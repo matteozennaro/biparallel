@@ -1,5 +1,5 @@
 import numpy as np
-from .core.core_functions import printmesh, compute_raw_bispectrum, compute_normalization
+from .core.core_functions import printmesh, compute_raw_bispectrum, compute_normalization, compute_effective_triangles
 
 class BiParallel:
     def __init__(self, density_mesh, Lbox, nthreads=1, verbose=True):
@@ -90,7 +90,8 @@ class BiParallel:
                         k2_max_bin.append(kbin_edges[j + 1])
                         k3_min_bin.append(kbin_edges[k])
                         k3_max_bin.append(kbin_edges[k + 1])
-        effective_triangles = np.array([k1_min_bin, k1_max_bin, k2_min_bin, k2_max_bin, k3_min_bin, k3_max_bin], dtype=np.float32)
+        ngrid = self.density_mesh.shape[0]
+        effective_triangles = compute_effective_triangles(ngrid, self.Lbox, k1_min_bin, k1_max_bin, k2_min_bin, k2_max_bin, k3_min_bin, k3_max_bin, self.nthreads, int(self.verbose))
         return effective_triangles
 
     def compute_bispectrum(self, kbin_edges):
