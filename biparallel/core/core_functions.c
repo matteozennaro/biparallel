@@ -76,6 +76,7 @@ typedef struct { unsigned long long cell; float val; } mesh_buf_entry_t;
 static PyObject * core_printmesh(PyObject * self, PyObject * args);
 static PyObject * core_compute_raw_bispectrum(PyObject * self, PyObject * args);
 static PyObject * core_compute_normalization(PyObject * self, PyObject * args);
+static PyObject * core_compute_effective_triangles(PyObject * self, PyObject * args);
 static PyObject * core_check_precision(PyObject * self, PyObject * args);
 static PyObject * core_set_wisdom_path(PyObject * self, PyObject * args);
 
@@ -90,6 +91,7 @@ static PyMethodDef core_methods[] = {
  { "printmesh",       core_printmesh, METH_VARARGS, "Prints the mesh" },
  { "compute_raw_bispectrum",  core_compute_raw_bispectrum, METH_VARARGS, "Computes the raw bispectrum" },
  { "compute_normalization",   core_compute_normalization, METH_VARARGS, "Computes the normalization" },
+ { "compute_effective_triangles", core_compute_effective_triangles, METH_VARARGS, "Computes the effective triangles" },
  { "check_precision", core_check_precision, METH_VARARGS, "Returns precision of grids" },
  { "set_wisdom_path", core_set_wisdom_path, METH_VARARGS, "set_wisdom_path(path): set auto-save/load wisdom file path for power module" },
  { "clear_plan_cache", core_clear_plan_cache, METH_NOARGS, "clear_plan_cache(): destroy cached FFTW plan (call before changing ngrid)" },
@@ -644,6 +646,11 @@ static PyObject *core_compute_normalization(PyObject * self, PyObject * args)
     Py_DECREF(k3min_arr);
     Py_DECREF(k3max_arr);
     return (PyObject *)normalization_array;
+}
+
+static PyObject *core_compute_effective_triangles(PyObject * self, PyObject * args)
+{
+
 }
 
 static PyObject *core_printmesh(PyObject * self, PyObject * args)

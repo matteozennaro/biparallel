@@ -72,6 +72,27 @@ class BiParallel:
         normalization = compute_normalization(ngrid, self.Lbox, k1_min_bin, k1_max_bin, k2_min_bin, k2_max_bin, k3_min_bin, k3_max_bin, self.nthreads, int(self.verbose))
         return normalization
 
+    def compute_effective_triangles(self, kbin_edges):
+        k1_min_bin = []
+        k1_max_bin = []
+        k2_min_bin = []
+        k2_max_bin = []
+        k3_min_bin = []
+        k3_max_bin = []
+        kbin_centers = 0.5 * (kbin_edges[:-1] + kbin_edges[1:])
+        for i in range(len(kbin_edges) - 1):
+            for j in range(i, len(kbin_edges) - 1):
+                for k in range(j, len(kbin_edges) - 1):
+                    if kbin_centers[k] <= kbin_centers[i] + kbin_centers[j]:
+                        k1_min_bin.append(kbin_edges[i])
+                        k1_max_bin.append(kbin_edges[i + 1])
+                        k2_min_bin.append(kbin_edges[j])
+                        k2_max_bin.append(kbin_edges[j + 1])
+                        k3_min_bin.append(kbin_edges[k])
+                        k3_max_bin.append(kbin_edges[k + 1])
+        effective_triangles = np.array([k1_min_bin, k1_max_bin, k2_min_bin, k2_max_bin, k3_min_bin, k3_max_bin], dtype=np.float32)
+        return effective_triangles
+
     def compute_bispectrum(self, kbin_edges):
         raw_bispectrum = self.compute_raw_bispectrum(kbin_edges)
         normalization = self.compute_normalization(kbin_edges)
