@@ -71,3 +71,9 @@ class BiParallel:
         ngrid = self.density_mesh.shape[0]
         normalization = compute_normalization(ngrid, self.Lbox, k1_min_bin, k1_max_bin, k2_min_bin, k2_max_bin, k3_min_bin, k3_max_bin, self.nthreads, int(self.verbose))
         return normalization
+
+    def compute_bispectrum(self, kbin_edges):
+        raw_bispectrum = self.compute_raw_bispectrum(kbin_edges)
+        normalization = self.compute_normalization(kbin_edges)
+        bispectrum = raw_bispectrum / normalization * self.Lbox**6 / self.density_mesh.size**3
+        return bispectrum
