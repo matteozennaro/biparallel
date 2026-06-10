@@ -286,7 +286,7 @@ static inline unsigned short morton_2d_8bit(unsigned char y, unsigned char z) {
     return (unsigned short)(spread_bits_8(z) | (spread_bits_8(y) << 1));
 }
 
-fft_complex *apply_mask(fft_complex *density_mesh_fourier, int ngrid, float Lbox, float kmin_bin, float kmax_bin)
+fft_complex *apply_mask(fft_complex *density_mesh_fourier, int ngrid, float Lbox, float kmin_bin, float kmax_bin, int nthreads)
 {
     // Create a copy of the input array to apply the mask to
     fft_complex *masked_density_mesh_fourier = (fft_complex *)malloc(sizeof(fft_complex) * ngrid * ngrid * (ngrid / 2 + 1));
@@ -296,21 +296,24 @@ fft_complex *apply_mask(fft_complex *density_mesh_fourier, int ngrid, float Lbox
     }
     memcpy(masked_density_mesh_fourier, density_mesh_fourier, sizeof(fft_complex) * ngrid * ngrid * (ngrid / 2 + 1));
 
-    int i, j, k;
     float dk = 2.0f * M_PI / Lbox;
-    float kx, ky, kz, k_mag;
-    for (i = 0; i < ngrid; i++) {
-        kx = modulus(i, ngrid) * dk;
-        for (j = 0; j < ngrid; j++) {
-        ky = modulus(j, ngrid) * dk;
-        for (k = 0; k < ngrid / 2 + 1; k++) {
-            kz = k * dk;
-            k_mag = sqrtf(kx * kx + ky * ky + kz * kz);
-            if (k_mag < kmin_bin || k_mag >= kmax_bin) {
-            masked_density_mesh_fourier[fftw_index(i, j, k, ngrid, &(int){0})] = 0.0f + 0.0f * I;
-            }
+    int nz = ngrid / 2 + 1;
+  #ifdef _OPENMP
+  #pragma omp parallel for collapse(2) schedule(static) num_threads(nthreads > 0 ? nthreads : 1)
+  #endif
+    for (int i = 0; i < ngrid; i++) {
+      for (int j = 0; j < ngrid; j++) {
+        float kx = modulus(i, ngrid) * dk;
+        float ky = modulus(j, ngrid) * dk;
+        for (int k = 0; k < nz; k++) {
+          float kz = k * dk;
+          float k_mag = sqrtf(kx * kx + ky * ky + kz * kz);
+          if (k_mag < kmin_bin || k_mag >= kmax_bin) {
+            unsigned long long idx = (unsigned long long)nz * ((unsigned long long)ngrid * (unsigned long long)j + (unsigned long long)i) + (unsigned long long)k;
+            masked_density_mesh_fourier[idx] = 0.0f + 0.0f * I;
+          }
         }
-        }
+      }
     }
     return masked_density_mesh_fourier;
 }
@@ -318,7 +321,7 @@ fft_complex *apply_mask(fft_complex *density_mesh_fourier, int ngrid, float Lbox
 fft_real *compute_Ik(fft_complex *density_mesh_fourier, int ngrid, float Lbox, float kmin_bin, float kmax_bin, int nthreads)
 {
     // Apply the mask to the density mesh in Fourier space
-    fft_complex *masked_density_mesh_fourier = apply_mask(density_mesh_fourier, ngrid, Lbox, kmin_bin, kmax_bin);
+  fft_complex *masked_density_mesh_fourier = apply_mask(density_mesh_fourier, ngrid, Lbox, kmin_bin, kmax_bin, nthreads);
 
     // Compute the inverse FFT of the masked density mesh to get the masked density mesh in real space
     fft_real *masked_density_mesh_real = (fft_real *)malloc(sizeof(fft_real) * ngrid * ngrid * ngrid);
@@ -704,13 +707,18 @@ static PyObject *core_compute_effective_triangles(PyObject * self, PyObject * ar
     return NULL;
   }
   float dk = 2.0f * M_PI / Lbox;
+  int nz = ngrid / 2 + 1;
+#ifdef _OPENMP
+#pragma omp parallel for collapse(2) schedule(static) num_threads(nthreads > 0 ? nthreads : 1)
+#endif
   for (int i = 0; i < ngrid; i++) {
-    float kx = modulus(i, ngrid) * dk;
     for (int j = 0; j < ngrid; j++) {
+      float kx = modulus(i, ngrid) * dk;
       float ky = modulus(j, ngrid) * dk;
-      for (int k = 0; k < ngrid / 2 + 1; k++) {
+      for (int k = 0; k < nz; k++) {
         float kz = k * dk;
-        k_mesh_fourier[fftw_index(i, j, k, ngrid, &(int){0})] = sqrtf(kx * kx + ky * ky + kz * kz) + 0.0f * I;
+        unsigned long long idx = (unsigned long long)nz * ((unsigned long long)ngrid * (unsigned long long)j + (unsigned long long)i) + (unsigned long long)k;
+        k_mesh_fourier[idx] = sqrtf(kx * kx + ky * ky + kz * kz) + 0.0f * I;
       }
     }
   }
@@ -818,6 +826,9 @@ static PyObject *core_compute_effective_triangles(PyObject * self, PyObject * ar
     }
 
     double k1eff_value = 0.0, k2eff_value = 0.0, k3eff_value = 0.0;
+  #ifdef _OPENMP
+  #pragma omp parallel for reduction(+:k1eff_value,k2eff_value,k3eff_value) schedule(static) num_threads(nthreads > 0 ? nthreads : 1)
+  #endif
     for (int j = 0; j < ngrid * ngrid * ngrid; j++) {
       k1eff_value += Iq1[j] * Ik2[j] * Ik3[j];
       k2eff_value += Ik1[j] * Iq2[j] * Ik3[j];
