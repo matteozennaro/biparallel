@@ -315,7 +315,7 @@ fft_complex *apply_mask(fft_complex *density_mesh_fourier, int ngrid, float Lbox
     return masked_density_mesh_fourier;
 }
 
-fft_real *compute_Ik(fft_complex *density_mesh_fourier, int ngrid, float Lbox, float kmin_bin, float kmax_bin)
+fft_real *compute_Ik(fft_complex *density_mesh_fourier, int ngrid, float Lbox, float kmin_bin, float kmax_bin, int nthreads)
 {
     // Apply the mask to the density mesh in Fourier space
     fft_complex *masked_density_mesh_fourier = apply_mask(density_mesh_fourier, ngrid, Lbox, kmin_bin, kmax_bin);
@@ -327,7 +327,7 @@ fft_real *compute_Ik(fft_complex *density_mesh_fourier, int ngrid, float Lbox, f
         free(masked_density_mesh_fourier);
         return NULL;
     }
-    FFTW(plan) inv_plan = power_get_inverse_plan(ngrid, 1);
+    FFTW(plan) inv_plan = power_get_inverse_plan(ngrid, nthreads);
     if (inv_plan == NULL) {
         fprintf(stderr, "Error creating inverse FFT plan\n");
         free(masked_density_mesh_fourier);
@@ -349,8 +349,6 @@ static PyObject *core_compute_raw_bispectrum(PyObject * self, PyObject * args)
     if (!PyArg_ParseTuple(args, "OfOOOOOOii", &density_mesh_real, &Lbox, &k1min_bin_obj, &k1max_bin_obj, &k2min_bin_obj, &k2max_bin_obj, &k3min_bin_obj, &k3max_bin_obj, &nthreads, &verbose)) {
         return NULL;
     }
-
-    (void)nthreads;
 
     PyArrayObject *mesh_array_real = (PyArrayObject *)PyArray_FROM_OTF(
         density_mesh_real, NP_OUT_TYPE, NPY_ARRAY_IN_ARRAY);
@@ -433,7 +431,7 @@ static PyObject *core_compute_raw_bispectrum(PyObject * self, PyObject * args)
         Py_DECREF(mesh_array_real);
         return NULL;
     }
-    FFTW(plan) fwd_plan = power_get_forward_plan((int)PyArray_DIM(mesh_array_real, 0), 1);
+    FFTW(plan) fwd_plan = power_get_forward_plan((int)PyArray_DIM(mesh_array_real, 0), nthreads);
     if (fwd_plan == NULL) {
       PyErr_SetString(PyExc_RuntimeError, "Error creating forward FFT plan");
         free(density_mesh_fourier);
@@ -474,9 +472,9 @@ static PyObject *core_compute_raw_bispectrum(PyObject * self, PyObject * args)
         float k2max = k2max_bin[i];
         float k3min = k3min_bin[i];
         float k3max = k3max_bin[i];
-        fft_real *Ik1 = compute_Ik(density_mesh_fourier, ngrid, Lbox, k1min, k1max);
-        fft_real *Ik2 = compute_Ik(density_mesh_fourier, ngrid, Lbox, k2min, k2max);
-        fft_real *Ik3 = compute_Ik(density_mesh_fourier, ngrid, Lbox, k3min, k3max);
+        fft_real *Ik1 = compute_Ik(density_mesh_fourier, ngrid, Lbox, k1min, k1max, nthreads);
+        fft_real *Ik2 = compute_Ik(density_mesh_fourier, ngrid, Lbox, k2min, k2max, nthreads);
+        fft_real *Ik3 = compute_Ik(density_mesh_fourier, ngrid, Lbox, k3min, k3max, nthreads);
         if (Ik1 == NULL || Ik2 == NULL || Ik3 == NULL) {
           PyErr_Format(PyExc_RuntimeError, "Error computing Ik for bin %d", i);
           if (Ik1) free(Ik1);
@@ -526,7 +524,6 @@ static PyObject *core_compute_normalization(PyObject * self, PyObject * args)
         return NULL;
     }
 
-    (void)nthreads;
     (void)verbose;
 
     PyArrayObject *k1min_arr = (PyArrayObject *)PyArray_FROM_OTF(k1min_bin_obj, NPY_FLOAT32, NPY_ARRAY_IN_ARRAY);
@@ -609,9 +606,9 @@ static PyObject *core_compute_normalization(PyObject * self, PyObject * args)
         float k2max = k2max_bin[i];
         float k3min = k3min_bin[i];
         float k3max = k3max_bin[i];
-        fft_real *Ik1 = compute_Ik(dummy_density_mesh_fourier, ngrid, Lbox, k1min, k1max);
-        fft_real *Ik2 = compute_Ik(dummy_density_mesh_fourier, ngrid, Lbox, k2min, k2max);
-        fft_real *Ik3 = compute_Ik(dummy_density_mesh_fourier, ngrid, Lbox, k3min, k3max);
+        fft_real *Ik1 = compute_Ik(dummy_density_mesh_fourier, ngrid, Lbox, k1min, k1max, nthreads);
+        fft_real *Ik2 = compute_Ik(dummy_density_mesh_fourier, ngrid, Lbox, k2min, k2max, nthreads);
+        fft_real *Ik3 = compute_Ik(dummy_density_mesh_fourier, ngrid, Lbox, k3min, k3max, nthreads);
         if (Ik1 == NULL || Ik2 == NULL || Ik3 == NULL) {
           PyErr_Format(PyExc_RuntimeError, "Error computing Ik for bin %d", i);
           if (Ik1) free(Ik1);
@@ -658,7 +655,6 @@ static PyObject *core_compute_effective_triangles(PyObject * self, PyObject * ar
     return NULL;
   }
 
-  (void)nthreads;
   (void)verbose;
 
   PyArrayObject *k1min_arr = (PyArrayObject *)PyArray_FROM_OTF(k1min_bin_obj, NPY_FLOAT32, NPY_ARRAY_IN_ARRAY);
@@ -796,12 +792,12 @@ static PyObject *core_compute_effective_triangles(PyObject * self, PyObject * ar
     float k2max = k2max_bin[i];
     float k3min = k3min_bin[i];
     float k3max = k3max_bin[i];
-    fft_real *Ik1 = compute_Ik(dummy_density_mesh_fourier, ngrid, Lbox, k1min, k1max);
-    fft_real *Ik2 = compute_Ik(dummy_density_mesh_fourier, ngrid, Lbox, k2min, k2max);
-    fft_real *Ik3 = compute_Ik(dummy_density_mesh_fourier, ngrid, Lbox, k3min, k3max);
-    fft_real *Iq1 = compute_Ik(k_mesh_fourier, ngrid, Lbox, k1min, k1max);
-    fft_real *Iq2 = compute_Ik(k_mesh_fourier, ngrid, Lbox, k2min, k2max);
-    fft_real *Iq3 = compute_Ik(k_mesh_fourier, ngrid, Lbox, k3min, k3max);
+    fft_real *Ik1 = compute_Ik(dummy_density_mesh_fourier, ngrid, Lbox, k1min, k1max, nthreads);
+    fft_real *Ik2 = compute_Ik(dummy_density_mesh_fourier, ngrid, Lbox, k2min, k2max, nthreads);
+    fft_real *Ik3 = compute_Ik(dummy_density_mesh_fourier, ngrid, Lbox, k3min, k3max, nthreads);
+    fft_real *Iq1 = compute_Ik(k_mesh_fourier, ngrid, Lbox, k1min, k1max, nthreads);
+    fft_real *Iq2 = compute_Ik(k_mesh_fourier, ngrid, Lbox, k2min, k2max, nthreads);
+    fft_real *Iq3 = compute_Ik(k_mesh_fourier, ngrid, Lbox, k3min, k3max, nthreads);
     if (Ik1 == NULL || Ik2 == NULL || Ik3 == NULL || Iq1 == NULL || Iq2 == NULL || Iq3 == NULL) {
       PyErr_Format(PyExc_RuntimeError, "Error computing Ik for bin %d", i);
       if (Ik1) free(Ik1);
@@ -898,6 +894,9 @@ PyMODINIT_FUNC PyInit_core_functions(void)
         return NULL;
     }
     import_array();
+#ifdef _OPENMP
+    FFTW(init_threads)();
+#endif
     /* Destroy the cached plan on interpreter shutdown so FFTW doesn't warn
      * about dangling plans. We intentionally do not call cleanup_threads
      * here — other FFTW-using extensions in this process may still be alive
