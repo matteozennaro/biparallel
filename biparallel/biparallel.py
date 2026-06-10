@@ -14,8 +14,7 @@ class BiParallel:
         verbose = int(self.verbose)  # Set to True for detailed output
         printmesh(self.density_mesh, nthreads, verbose)
 
-    def compute_raw_bispectrum(self, kbin_edges):
-        # Compute all triangle configurations
+    def _compute_triangle_bins(self, kbin_edges):
         k1_min_bin = []
         k1_max_bin = []
         k2_min_bin = []
@@ -33,64 +32,29 @@ class BiParallel:
                         k2_max_bin.append(kbin_edges[j + 1])
                         k3_min_bin.append(kbin_edges[k])
                         k3_max_bin.append(kbin_edges[k + 1])
-        k1_min_bin = np.array(k1_min_bin, dtype=np.float32)
-        k1_max_bin = np.array(k1_max_bin, dtype=np.float32)
-        k2_min_bin = np.array(k2_min_bin, dtype=np.float32)
-        k2_max_bin = np.array(k2_max_bin, dtype=np.float32)
-        k3_min_bin = np.array(k3_min_bin, dtype=np.float32)
-        k3_max_bin = np.array(k3_max_bin, dtype=np.float32)
+        return (np.array(k1_min_bin, dtype=np.float32), np.array(k1_max_bin, dtype=np.float32),
+                np.array(k2_min_bin, dtype=np.float32), np.array(k2_max_bin, dtype=np.float32),
+                np.array(k3_min_bin, dtype=np.float32), np.array(k3_max_bin, dtype=np.float32))
+
+    def compute_raw_bispectrum(self, kbin_edges):
+        # Compute all triangle configurations
+        k1_min_bin, k1_max_bin, k2_min_bin, k2_max_bin, k3_min_bin, k3_max_bin = self._compute_triangle_bins(kbin_edges)
         # Call the core function to compute the raw bispectrum
         self.raw_bispectrum = compute_raw_bispectrum(self.density_mesh, self.Lbox, k1_min_bin, k1_max_bin, k2_min_bin, k2_max_bin, k3_min_bin, k3_max_bin, self.nthreads, int(self.verbose))
         return self.raw_bispectrum
 
     def compute_normalization(self, kbin_edges):
         # Similar to compute_raw_bispectrum but calls a different core function for normalization
-        k1_min_bin = []
-        k1_max_bin = []
-        k2_min_bin = []
-        k2_max_bin = []
-        k3_min_bin = []
-        k3_max_bin = []
-        kbin_centers = 0.5 * (kbin_edges[:-1] + kbin_edges[1:])
-        for i in range(len(kbin_edges) - 1):
-            for j in range(i, len(kbin_edges) - 1):
-                for k in range(j, len(kbin_edges) - 1):
-                    if kbin_centers[k] <= kbin_centers[i] + kbin_centers[j]:
-                        k1_min_bin.append(kbin_edges[i])
-                        k1_max_bin.append(kbin_edges[i + 1])
-                        k2_min_bin.append(kbin_edges[j])
-                        k2_max_bin.append(kbin_edges[j + 1])
-                        k3_min_bin.append(kbin_edges[k])
-                        k3_max_bin.append(kbin_edges[k + 1])
-        k1_min_bin = np.array(k1_min_bin, dtype=np.float32)
-        k1_max_bin = np.array(k1_max_bin, dtype=np.float32)
-        k2_min_bin = np.array(k2_min_bin, dtype=np.float32)
-        k2_max_bin = np.array(k2_max_bin, dtype=np.float32)
-        k3_min_bin = np.array(k3_min_bin, dtype=np.float32)
-        k3_max_bin = np.array(k3_max_bin, dtype=np.float32)
+        k1_min_bin, k1_max_bin, k2_min_bin, k2_max_bin, k3_min_bin, k3_max_bin = self._compute_triangle_bins(kbin_edges)
         # Call the core function to compute the normalization
         ngrid = self.density_mesh.shape[0]
         self.normalization = compute_normalization(ngrid, self.Lbox, k1_min_bin, k1_max_bin, k2_min_bin, k2_max_bin, k3_min_bin, k3_max_bin, self.nthreads, int(self.verbose))
         return self.normalization
 
     def compute_effective_triangles(self, kbin_edges):
-        k1_min_bin = []
-        k1_max_bin = []
-        k2_min_bin = []
-        k2_max_bin = []
-        k3_min_bin = []
-        k3_max_bin = []
-        kbin_centers = 0.5 * (kbin_edges[:-1] + kbin_edges[1:])
-        for i in range(len(kbin_edges) - 1):
-            for j in range(i, len(kbin_edges) - 1):
-                for k in range(j, len(kbin_edges) - 1):
-                    if kbin_centers[k] <= kbin_centers[i] + kbin_centers[j]:
-                        k1_min_bin.append(kbin_edges[i])
-                        k1_max_bin.append(kbin_edges[i + 1])
-                        k2_min_bin.append(kbin_edges[j])
-                        k2_max_bin.append(kbin_edges[j + 1])
-                        k3_min_bin.append(kbin_edges[k])
-                        k3_max_bin.append(kbin_edges[k + 1])
+        # Similar to compute_raw_bispectrum but calls a different core function for effective triangles
+        k1_min_bin, k1_max_bin, k2_min_bin, k2_max_bin, k3_min_bin, k3_max_bin = self._compute_triangle_bins(kbin_edges)
+        # Call the core function to compute the effective triangles
         ngrid = self.density_mesh.shape[0]
         effective_triangles = compute_effective_triangles(ngrid, self.Lbox, k1_min_bin, k1_max_bin, k2_min_bin, k2_max_bin, k3_min_bin, k3_max_bin, self.nthreads, int(self.verbose))
         normalization = self.compute_normalization(kbin_edges) if not hasattr(self, 'normalization') else self.normalization
@@ -101,4 +65,5 @@ class BiParallel:
         raw_bispectrum = self.compute_raw_bispectrum(kbin_edges) if not hasattr(self, 'raw_bispectrum') else self.raw_bispectrum
         normalization = self.compute_normalization(kbin_edges) if not hasattr(self, 'normalization') else self.normalization
         bispectrum = raw_bispectrum / normalization * self.Lbox**6 / self.density_mesh.size**3
-        return bispectrum
+        effective_triangles = self.compute_effective_triangles(kbin_edges) if not hasattr(self, 'effective_triangles') else self.effective_triangles
+        return {'bispectrum': bispectrum, 'effective_triangles': effective_triangles}
