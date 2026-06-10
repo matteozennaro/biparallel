@@ -4,6 +4,7 @@
 
 
 #include <string.h>
+#include <strings.h>
 #include <math.h>
 #include <stdbool.h>
 #include <complex.h>
@@ -319,6 +320,80 @@ fft_complex *apply_mask(fft_complex *density_mesh_fourier, int ngrid, float Lbox
   }
   return masked_density_mesh_fourier;
 }
+
+static int apply_mask_into_buffer(const fft_complex *density_mesh_fourier, fft_complex *masked_density_mesh_fourier,
+                                  int ngrid, float Lbox, float kmin_bin, float kmax_bin)
+{
+  size_t nfour = (size_t)ngrid * (size_t)ngrid * (size_t)(ngrid / 2 + 1);
+  if (density_mesh_fourier == NULL || masked_density_mesh_fourier == NULL) {
+    return -1;
+  }
+
+  memcpy(masked_density_mesh_fourier, density_mesh_fourier, sizeof(fft_complex) * nfour);
+
+  float dk = 2.0f * M_PI / Lbox;
+  float kmin2 = kmin_bin * kmin_bin;
+  float kmax2 = kmax_bin * kmax_bin;
+  int nz = ngrid / 2 + 1;
+
+  for (int i = 0; i < ngrid; i++) {
+    float kx = modulus(i, ngrid) * dk;
+    for (int j = 0; j < ngrid; j++) {
+      float ky = modulus(j, ngrid) * dk;
+      for (int k = 0; k < nz; k++) {
+        float kz = k * dk;
+        float k_mag2 = kx * kx + ky * ky + kz * kz;
+        if (k_mag2 < kmin2 || k_mag2 >= kmax2) {
+          unsigned long long idx = (unsigned long long)nz * ((unsigned long long)ngrid * (unsigned long long)j + (unsigned long long)i) + (unsigned long long)k;
+          masked_density_mesh_fourier[idx] = 0.0f + 0.0f * I;
+        }
+      }
+    }
+  }
+
+  return 0;
+}
+
+static int compute_Ik_with_workspace(const fft_complex *density_mesh_fourier, fft_complex *masked_workspace,
+                                     fft_real *real_workspace, FFTW(plan) inv_plan,
+                                     int ngrid, float Lbox, float kmin_bin, float kmax_bin)
+{
+  if (apply_mask_into_buffer(density_mesh_fourier, masked_workspace, ngrid, Lbox, kmin_bin, kmax_bin) != 0) {
+    return -1;
+  }
+  FFTW(execute_dft_c2r)(inv_plan, masked_workspace, real_workspace);
+  return 0;
+}
+
+#ifdef _OPENMP
+static void get_effective_triangles_omp_schedule(omp_sched_t *kind, int *chunk)
+{
+  const char *schedule_env = getenv("BIPARALLEL_OMP_SCHEDULE");
+  const char *chunk_env = getenv("BIPARALLEL_OMP_CHUNK");
+
+  *kind = omp_sched_dynamic;
+  *chunk = 1;
+
+  if (schedule_env != NULL && schedule_env[0] != '\0') {
+    if (strcasecmp(schedule_env, "static") == 0) {
+      *kind = omp_sched_static;
+    } else if (strcasecmp(schedule_env, "dynamic") == 0) {
+      *kind = omp_sched_dynamic;
+    } else if (strcasecmp(schedule_env, "guided") == 0) {
+      *kind = omp_sched_guided;
+    } else if (strcasecmp(schedule_env, "auto") == 0) {
+      *kind = omp_sched_auto;
+    }
+  }
+
+  if (chunk_env != NULL && chunk_env[0] != '\0') {
+    int parsed_chunk = atoi(chunk_env);
+    if (parsed_chunk > 0) {
+      *chunk = parsed_chunk;
+    }
+  }
+}
+#endif
 
 fft_real *compute_Ik(fft_complex *density_mesh_fourier, int ngrid, float Lbox, float kmin_bin, float kmax_bin, int nthreads)
 {
@@ -761,7 +836,6 @@ static PyObject *core_compute_effective_triangles(PyObject * self, PyObject * ar
     Py_DECREF(k2max_arr);
     Py_DECREF(k3min_arr);
     Py_DECREF(k3max_arr);
-    Py_DECREF(k1_eff);
     return NULL;
   }
   PyArrayObject *k2_eff = (PyArrayObject *)PyArray_EMPTY(1, out_dims, NPY_FLOAT, 0);
@@ -775,7 +849,6 @@ static PyObject *core_compute_effective_triangles(PyObject * self, PyObject * ar
     Py_DECREF(k3min_arr);
     Py_DECREF(k3max_arr);
     Py_DECREF(k1_eff);
-    Py_DECREF(k2_eff);
     return NULL;
   }
   PyArrayObject *k3_eff = (PyArrayObject *)PyArray_EMPTY(1, out_dims, NPY_FLOAT, 0);
@@ -790,7 +863,6 @@ static PyObject *core_compute_effective_triangles(PyObject * self, PyObject * ar
     Py_DECREF(k3max_arr);
     Py_DECREF(k1_eff);
     Py_DECREF(k2_eff);
-    Py_DECREF(k3_eff);
     return NULL;
   }
 
@@ -801,83 +873,239 @@ static PyObject *core_compute_effective_triangles(PyObject * self, PyObject * ar
   int total_cells = ngrid * ngrid * ngrid;
   int bin_error = 0;
   int error_bin = -1;
+  int worker_threads = (nthreads > 0) ? nthreads : 1;
+  size_t nfour = (size_t)ngrid * (size_t)ngrid * (size_t)(ngrid / 2 + 1);
+  size_t nreal = (size_t)ngrid * (size_t)ngrid * (size_t)ngrid;
 
 #ifdef _OPENMP
-#pragma omp parallel for schedule(dynamic, 1) num_threads(nthreads > 0 ? nthreads : 1)
-#endif
-  for (int i = 0; i < n_of_kbins; i++) {
-    float k1min = k1min_bin[i];
-    float k1max = k1max_bin[i];
-    float k2min = k2min_bin[i];
-    float k2max = k2max_bin[i];
-    float k3min = k3min_bin[i];
-    float k3max = k3max_bin[i];
+  omp_sched_t sched_kind;
+  int sched_chunk;
+  omp_sched_t prev_sched_kind;
+  int prev_sched_chunk;
+  get_effective_triangles_omp_schedule(&sched_kind, &sched_chunk);
+  omp_get_schedule(&prev_sched_kind, &prev_sched_chunk);
+  omp_set_schedule(sched_kind, sched_chunk);
 
-    /* Avoid nested oversubscription: outer loop is parallel, keep inner FFT/mask work single-threaded per bin. */
-    int ik_threads = 1;
-    fft_real *Ik1 = NULL;
-    fft_real *Ik2 = NULL;
-    fft_real *Ik3 = NULL;
-    fft_real *Iq1 = NULL;
-    fft_real *Iq2 = NULL;
-    fft_real *Iq3 = NULL;
+#pragma omp parallel num_threads(worker_threads)
+  {
+    fft_complex *masked_workspace = (fft_complex *)FFTW(malloc)(sizeof(fft_complex) * nfour);
+    fft_real *ik1_workspace = (fft_real *)FFTW(malloc)(sizeof(fft_real) * nreal);
+    fft_real *ik2_workspace = (fft_real *)FFTW(malloc)(sizeof(fft_real) * nreal);
+    fft_real *ik3_workspace = (fft_real *)FFTW(malloc)(sizeof(fft_real) * nreal);
+    fft_real *iq_workspace = (fft_real *)FFTW(malloc)(sizeof(fft_real) * nreal);
+    FFTW(plan) inv_plan = NULL;
+    int local_setup_error = 0;
 
-#ifdef _OPENMP
-#pragma omp critical(fftw_compute_ik)
-#endif
-    {
-      Ik1 = compute_Ik(dummy_density_mesh_fourier, ngrid, Lbox, k1min, k1max, ik_threads);
-      Ik2 = compute_Ik(dummy_density_mesh_fourier, ngrid, Lbox, k2min, k2max, ik_threads);
-      Ik3 = compute_Ik(dummy_density_mesh_fourier, ngrid, Lbox, k3min, k3max, ik_threads);
-      Iq1 = compute_Ik(k_mesh_fourier, ngrid, Lbox, k1min, k1max, ik_threads);
-      Iq2 = compute_Ik(k_mesh_fourier, ngrid, Lbox, k2min, k2max, ik_threads);
-      Iq3 = compute_Ik(k_mesh_fourier, ngrid, Lbox, k3min, k3max, ik_threads);
+    if (masked_workspace == NULL || ik1_workspace == NULL || ik2_workspace == NULL || ik3_workspace == NULL || iq_workspace == NULL) {
+      local_setup_error = 1;
     }
 
-    if (Ik1 == NULL || Ik2 == NULL || Ik3 == NULL || Iq1 == NULL || Iq2 == NULL || Iq3 == NULL) {
-#ifdef _OPENMP
+    if (!local_setup_error) {
+#pragma omp critical(fftw_plan_build)
+      {
+        inv_plan = FFTW(plan_dft_c2r_3d)(ngrid, ngrid, ngrid, masked_workspace, ik1_workspace, FFTW_ESTIMATE);
+      }
+      if (inv_plan == NULL) {
+        local_setup_error = 1;
+      }
+    }
+
+    if (local_setup_error) {
 #pragma omp critical
-#endif
       {
         if (!bin_error) {
           bin_error = 1;
-          error_bin = i;
+          error_bin = -1;
         }
       }
-      if (Ik1) free(Ik1);
-      if (Ik2) free(Ik2);
-      if (Ik3) free(Ik3);
-      if (Iq1) free(Iq1);
-      if (Iq2) free(Iq2);
-      if (Iq3) free(Iq3);
-      continue;
+    } else {
+#pragma omp for schedule(runtime)
+      for (int i = 0; i < n_of_kbins; i++) {
+        float k1min = k1min_bin[i];
+        float k1max = k1max_bin[i];
+        float k2min = k2min_bin[i];
+        float k2max = k2max_bin[i];
+        float k3min = k3min_bin[i];
+        float k3max = k3max_bin[i];
+
+        if (compute_Ik_with_workspace(dummy_density_mesh_fourier, masked_workspace, ik1_workspace, inv_plan, ngrid, Lbox, k1min, k1max) != 0 ||
+            compute_Ik_with_workspace(dummy_density_mesh_fourier, masked_workspace, ik2_workspace, inv_plan, ngrid, Lbox, k2min, k2max) != 0 ||
+            compute_Ik_with_workspace(dummy_density_mesh_fourier, masked_workspace, ik3_workspace, inv_plan, ngrid, Lbox, k3min, k3max) != 0 ||
+            compute_Ik_with_workspace(k_mesh_fourier, masked_workspace, iq_workspace, inv_plan, ngrid, Lbox, k1min, k1max) != 0) {
+#pragma omp critical
+          {
+            if (!bin_error) {
+              bin_error = 1;
+              error_bin = i;
+            }
+          }
+          continue;
+        }
+
+        double k1eff_value = 0.0;
+        double k2eff_value = 0.0;
+        double k3eff_value = 0.0;
+#pragma omp simd reduction(+:k1eff_value)
+        for (int j = 0; j < total_cells; j++) {
+          k1eff_value += iq_workspace[j] * ik2_workspace[j] * ik3_workspace[j];
+        }
+
+        if (compute_Ik_with_workspace(k_mesh_fourier, masked_workspace, iq_workspace, inv_plan, ngrid, Lbox, k2min, k2max) != 0) {
+#pragma omp critical
+          {
+            if (!bin_error) {
+              bin_error = 1;
+              error_bin = i;
+            }
+          }
+          continue;
+        }
+#pragma omp simd reduction(+:k2eff_value)
+        for (int j = 0; j < total_cells; j++) {
+          k2eff_value += ik1_workspace[j] * iq_workspace[j] * ik3_workspace[j];
+        }
+
+        if (compute_Ik_with_workspace(k_mesh_fourier, masked_workspace, iq_workspace, inv_plan, ngrid, Lbox, k3min, k3max) != 0) {
+#pragma omp critical
+          {
+            if (!bin_error) {
+              bin_error = 1;
+              error_bin = i;
+            }
+          }
+          continue;
+        }
+#pragma omp simd reduction(+:k3eff_value)
+        for (int j = 0; j < total_cells; j++) {
+          k3eff_value += ik1_workspace[j] * ik2_workspace[j] * iq_workspace[j];
+        }
+
+        k1_eff_data[i] = (float)k1eff_value;
+        k2_eff_data[i] = (float)k2eff_value;
+        k3_eff_data[i] = (float)k3eff_value;
+      }
     }
 
-    double k1eff_value = 0.0, k2eff_value = 0.0, k3eff_value = 0.0;
-#ifdef _OPENMP
-#pragma omp simd reduction(+:k1eff_value,k2eff_value,k3eff_value)
-#endif
-    for (int j = 0; j < total_cells; j++) {
-      k1eff_value += Iq1[j] * Ik2[j] * Ik3[j];
-      k2eff_value += Ik1[j] * Iq2[j] * Ik3[j];
-      k3eff_value += Ik1[j] * Ik2[j] * Iq3[j];
+    if (inv_plan != NULL) {
+      FFTW(destroy_plan)(inv_plan);
     }
-    k1_eff_data[i] = (float)k1eff_value;
-    k2_eff_data[i] = (float)k2eff_value;
-    k3_eff_data[i] = (float)k3eff_value;
-
-    free(Ik1);
-    free(Ik2);
-    free(Ik3);
-    free(Iq1);
-    free(Iq2);
-    free(Iq3);
+    if (masked_workspace != NULL) {
+      FFTW(free)(masked_workspace);
+    }
+    if (ik1_workspace != NULL) {
+      FFTW(free)(ik1_workspace);
+    }
+    if (ik2_workspace != NULL) {
+      FFTW(free)(ik2_workspace);
+    }
+    if (ik3_workspace != NULL) {
+      FFTW(free)(ik3_workspace);
+    }
+    if (iq_workspace != NULL) {
+      FFTW(free)(iq_workspace);
+    }
   }
 
+  omp_set_schedule(prev_sched_kind, prev_sched_chunk);
+#else
+  fft_complex *masked_workspace = (fft_complex *)FFTW(malloc)(sizeof(fft_complex) * nfour);
+  fft_real *ik1_workspace = (fft_real *)FFTW(malloc)(sizeof(fft_real) * nreal);
+  fft_real *ik2_workspace = (fft_real *)FFTW(malloc)(sizeof(fft_real) * nreal);
+  fft_real *ik3_workspace = (fft_real *)FFTW(malloc)(sizeof(fft_real) * nreal);
+  fft_real *iq_workspace = (fft_real *)FFTW(malloc)(sizeof(fft_real) * nreal);
+  FFTW(plan) inv_plan = NULL;
+
+  if (masked_workspace == NULL || ik1_workspace == NULL || ik2_workspace == NULL || ik3_workspace == NULL || iq_workspace == NULL) {
+    bin_error = 1;
+    error_bin = -1;
+  } else {
+    inv_plan = FFTW(plan_dft_c2r_3d)(ngrid, ngrid, ngrid, masked_workspace, ik1_workspace, FFTW_ESTIMATE);
+    if (inv_plan == NULL) {
+      bin_error = 1;
+      error_bin = -1;
+    }
+  }
+
+  if (!bin_error) {
+    for (int i = 0; i < n_of_kbins; i++) {
+      float k1min = k1min_bin[i];
+      float k1max = k1max_bin[i];
+      float k2min = k2min_bin[i];
+      float k2max = k2max_bin[i];
+      float k3min = k3min_bin[i];
+      float k3max = k3max_bin[i];
+
+      if (compute_Ik_with_workspace(dummy_density_mesh_fourier, masked_workspace, ik1_workspace, inv_plan, ngrid, Lbox, k1min, k1max) != 0 ||
+          compute_Ik_with_workspace(dummy_density_mesh_fourier, masked_workspace, ik2_workspace, inv_plan, ngrid, Lbox, k2min, k2max) != 0 ||
+          compute_Ik_with_workspace(dummy_density_mesh_fourier, masked_workspace, ik3_workspace, inv_plan, ngrid, Lbox, k3min, k3max) != 0 ||
+          compute_Ik_with_workspace(k_mesh_fourier, masked_workspace, iq_workspace, inv_plan, ngrid, Lbox, k1min, k1max) != 0) {
+        bin_error = 1;
+        error_bin = i;
+        break;
+      }
+
+      double k1eff_value = 0.0;
+      double k2eff_value = 0.0;
+      double k3eff_value = 0.0;
+      for (int j = 0; j < total_cells; j++) {
+        k1eff_value += iq_workspace[j] * ik2_workspace[j] * ik3_workspace[j];
+      }
+
+      if (compute_Ik_with_workspace(k_mesh_fourier, masked_workspace, iq_workspace, inv_plan, ngrid, Lbox, k2min, k2max) != 0) {
+        bin_error = 1;
+        error_bin = i;
+        break;
+      }
+      for (int j = 0; j < total_cells; j++) {
+        k2eff_value += ik1_workspace[j] * iq_workspace[j] * ik3_workspace[j];
+      }
+
+      if (compute_Ik_with_workspace(k_mesh_fourier, masked_workspace, iq_workspace, inv_plan, ngrid, Lbox, k3min, k3max) != 0) {
+        bin_error = 1;
+        error_bin = i;
+        break;
+      }
+      for (int j = 0; j < total_cells; j++) {
+        k3eff_value += ik1_workspace[j] * ik2_workspace[j] * iq_workspace[j];
+      }
+
+      k1_eff_data[i] = (float)k1eff_value;
+      k2_eff_data[i] = (float)k2eff_value;
+      k3_eff_data[i] = (float)k3eff_value;
+    }
+  }
+
+  if (inv_plan != NULL) {
+    FFTW(destroy_plan)(inv_plan);
+  }
+  if (masked_workspace != NULL) {
+    FFTW(free)(masked_workspace);
+  }
+  if (ik1_workspace != NULL) {
+    FFTW(free)(ik1_workspace);
+  }
+  if (ik2_workspace != NULL) {
+    FFTW(free)(ik2_workspace);
+  }
+  if (ik3_workspace != NULL) {
+    FFTW(free)(ik3_workspace);
+  }
+  if (iq_workspace != NULL) {
+    FFTW(free)(iq_workspace);
+  }
+#endif
+
   if (bin_error) {
-    PyErr_Format(PyExc_RuntimeError, "Error computing Ik for bin %d", error_bin);
+    if (error_bin >= 0) {
+      PyErr_Format(PyExc_RuntimeError, "Error computing Ik for bin %d", error_bin);
+    } else {
+      PyErr_SetString(PyExc_RuntimeError, "Error allocating per-thread FFT workspace or creating inverse plan");
+    }
     free(dummy_density_mesh_fourier);
     free(k_mesh_fourier);
+    Py_DECREF(k1_eff);
+    Py_DECREF(k2_eff);
+    Py_DECREF(k3_eff);
     Py_DECREF(k1min_arr);
     Py_DECREF(k1max_arr);
     Py_DECREF(k2min_arr);
@@ -895,7 +1123,11 @@ static PyObject *core_compute_effective_triangles(PyObject * self, PyObject * ar
   Py_DECREF(k2max_arr);
   Py_DECREF(k3min_arr);
   Py_DECREF(k3max_arr);
-  return PyTuple_Pack(3, k1_eff, k2_eff, k3_eff);
+  PyObject *out = PyTuple_Pack(3, k1_eff, k2_eff, k3_eff);
+  Py_DECREF(k1_eff);
+  Py_DECREF(k2_eff);
+  Py_DECREF(k3_eff);
+  return out;
 }
 
 static PyObject *core_printmesh(PyObject * self, PyObject * args)
