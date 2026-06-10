@@ -9,6 +9,7 @@
 #include <stdbool.h>
 #include <complex.h>
 #include <assert.h>
+#include <stdlib.h>
 
 #include <time.h>
 #include <unistd.h>
@@ -107,72 +108,187 @@ static struct pow_table
 
 static int NPowerTable;
 
-/* ========== Out-of-place FFT plan cache (consolidated) ==========
- * The cache + wisdom path + FFTW_MEASURE logic now live in
- * bacco/include/fftw_utils.c (compiled into this extension via setup.py).
- * powermodule used to carry its own near-identical out-of-place cache and
- * a separate _power_wisdom_path; it now shares fftw_utils' out-of-place
- * cache so the whole C side has ONE wisdom file and ONE "building plans"
- * log line. The functions below are thin shims that keep the call sites
- * (power_get_forward_plan/power_get_inverse_plan) and the Python API
- * (clear_plan_cache/plan_cache_info/set_wisdom_path) unchanged, preserving
- * the contracts pinned by tests/unit/test_fftw_plan_cache.py.
- *
- * fftw_utils.h is intentionally NOT included: powermodule.c defines its
- * own FFTW()/fft_real/fft_complex, which would be a duplicate typedef
- * under -std=c99. Forward-declare the shared API instead; FFTW(plan)
- * expands identically (same precision) so it is ABI-compatible. */
-/* Local fallback cache helpers keep this extension self-contained. */
+/* Out-of-place FFTW plan cache + optional wisdom import/export. */
+static FFTW(plan) g_cached_fwd_plan = NULL;
+static FFTW(plan) g_cached_inv_plan = NULL;
+static int g_cached_ngrid = -1;
+static int g_cached_nthreads = -1;
+static long long g_plan_rebuild_count = 0;
+static int g_fftw_threads_initialized = 0;
+static int g_fftw_threads_configured = 1;
+static char *g_wisdom_path = NULL;
+static int g_wisdom_loaded_for_path = 0;
+
+static unsigned fft_get_planner_flag(void)
+{
+  const char *planner = getenv("BIPARALLEL_FFTW_PLANNER");
+  if (planner == NULL || planner[0] == '\0' || strcasecmp(planner, "estimate") == 0) {
+    return FFTW_ESTIMATE;
+  }
+  if (strcasecmp(planner, "measure") == 0) {
+    return FFTW_MEASURE;
+  }
+  if (strcasecmp(planner, "patient") == 0) {
+    return FFTW_PATIENT;
+  }
+  if (strcasecmp(planner, "exhaustive") == 0) {
+    return FFTW_EXHAUSTIVE;
+  }
+  return FFTW_ESTIMATE;
+}
+
+static void fft_ensure_threads(int nthreads)
+{
+#ifdef _OPENMP
+  int worker_threads = (nthreads > 0) ? nthreads : 1;
+  if (!g_fftw_threads_initialized) {
+    if (FFTW(init_threads)() == 0) {
+      return;
+    }
+    g_fftw_threads_initialized = 1;
+    g_fftw_threads_configured = -1;
+  }
+  if (g_fftw_threads_configured != worker_threads) {
+    FFTW(plan_with_nthreads)(worker_threads);
+    g_fftw_threads_configured = worker_threads;
+  }
+#else
+  (void)nthreads;
+#endif
+}
+
+static void fft_try_load_wisdom(void)
+{
+  if (g_wisdom_loaded_for_path) {
+    return;
+  }
+  g_wisdom_loaded_for_path = 1;
+  if (g_wisdom_path == NULL || g_wisdom_path[0] == '\0') {
+    return;
+  }
+
+  FILE *fp = fopen(g_wisdom_path, "r");
+  if (fp == NULL) {
+    return;
+  }
+  FFTW(import_wisdom_from_file)(fp);
+  fclose(fp);
+}
+
+static void fft_try_save_wisdom(void)
+{
+  if (g_wisdom_path == NULL || g_wisdom_path[0] == '\0') {
+    return;
+  }
+
+  FILE *fp = fopen(g_wisdom_path, "w");
+  if (fp == NULL) {
+    return;
+  }
+  FFTW(export_wisdom_to_file)(fp);
+  fclose(fp);
+}
+
 static void fft_oop_get_plans(int ngrid, int nthreads, FFTW(plan) *fwd, FFTW(plan) *inv)
 {
-  #ifdef _OPENMP
-  FFTW(init_threads)();
-  FFTW(plan_with_nthreads)(nthreads > 0 ? nthreads : 1);
-  #endif
+  int worker_threads = (nthreads > 0) ? nthreads : 1;
 
-  if (fwd) {
-    fft_real *in = (fft_real *)FFTW(malloc)(sizeof(fft_real) * ngrid * ngrid * ngrid);
-    fft_complex *out = (fft_complex *)FFTW(malloc)(sizeof(fft_complex) * ngrid * ngrid * (ngrid / 2 + 1));
-    if (in == NULL || out == NULL) {
-      if (in) FFTW(free)(in);
-      if (out) FFTW(free)(out);
-      *fwd = NULL;
+  if (g_cached_fwd_plan == NULL || g_cached_inv_plan == NULL ||
+      g_cached_ngrid != ngrid || g_cached_nthreads != worker_threads) {
+    if (g_cached_fwd_plan != NULL) {
+      FFTW(destroy_plan)(g_cached_fwd_plan);
+      g_cached_fwd_plan = NULL;
+    }
+    if (g_cached_inv_plan != NULL) {
+      FFTW(destroy_plan)(g_cached_inv_plan);
+      g_cached_inv_plan = NULL;
+    }
+
+    fft_ensure_threads(worker_threads);
+    fft_try_load_wisdom();
+
+    fft_real *fwd_in = (fft_real *)FFTW(malloc)(sizeof(fft_real) * (size_t)ngrid * (size_t)ngrid * (size_t)ngrid);
+    fft_complex *fwd_out = (fft_complex *)FFTW(malloc)(sizeof(fft_complex) * (size_t)ngrid * (size_t)ngrid * (size_t)(ngrid / 2 + 1));
+    fft_complex *inv_in = (fft_complex *)FFTW(malloc)(sizeof(fft_complex) * (size_t)ngrid * (size_t)ngrid * (size_t)(ngrid / 2 + 1));
+    fft_real *inv_out = (fft_real *)FFTW(malloc)(sizeof(fft_real) * (size_t)ngrid * (size_t)ngrid * (size_t)ngrid);
+
+    if (fwd_in != NULL && fwd_out != NULL && inv_in != NULL && inv_out != NULL) {
+      unsigned planner_flag = fft_get_planner_flag();
+      g_cached_fwd_plan = FFTW(plan_dft_r2c_3d)(ngrid, ngrid, ngrid, fwd_in, fwd_out, planner_flag);
+      g_cached_inv_plan = FFTW(plan_dft_c2r_3d)(ngrid, ngrid, ngrid, inv_in, inv_out, planner_flag);
+    }
+
+    if (fwd_in != NULL) FFTW(free)(fwd_in);
+    if (fwd_out != NULL) FFTW(free)(fwd_out);
+    if (inv_in != NULL) FFTW(free)(inv_in);
+    if (inv_out != NULL) FFTW(free)(inv_out);
+
+    if (g_cached_fwd_plan != NULL && g_cached_inv_plan != NULL) {
+      g_cached_ngrid = ngrid;
+      g_cached_nthreads = worker_threads;
+      g_plan_rebuild_count++;
+      fft_try_save_wisdom();
     } else {
-      *fwd = FFTW(plan_dft_r2c_3d)(ngrid, ngrid, ngrid, in, out, FFTW_ESTIMATE);
-      FFTW(free)(in);
-      FFTW(free)(out);
+      if (g_cached_fwd_plan != NULL) {
+        FFTW(destroy_plan)(g_cached_fwd_plan);
+        g_cached_fwd_plan = NULL;
+      }
+      if (g_cached_inv_plan != NULL) {
+        FFTW(destroy_plan)(g_cached_inv_plan);
+        g_cached_inv_plan = NULL;
+      }
+      g_cached_ngrid = -1;
+      g_cached_nthreads = -1;
     }
   }
 
-  if (inv) {
-    fft_complex *in = (fft_complex *)FFTW(malloc)(sizeof(fft_complex) * ngrid * ngrid * (ngrid / 2 + 1));
-    fft_real *out = (fft_real *)FFTW(malloc)(sizeof(fft_real) * ngrid * ngrid * ngrid);
-    if (in == NULL || out == NULL) {
-      if (in) FFTW(free)(in);
-      if (out) FFTW(free)(out);
-      *inv = NULL;
-    } else {
-      *inv = FFTW(plan_dft_c2r_3d)(ngrid, ngrid, ngrid, in, out, FFTW_ESTIMATE);
-      FFTW(free)(in);
-      FFTW(free)(out);
-    }
+  if (fwd != NULL) {
+    *fwd = g_cached_fwd_plan;
+  }
+  if (inv != NULL) {
+    *inv = g_cached_inv_plan;
   }
 }
 
 static void fft_oop_cache_destroy(void)
 {
+  if (g_cached_fwd_plan != NULL) {
+    FFTW(destroy_plan)(g_cached_fwd_plan);
+    g_cached_fwd_plan = NULL;
+  }
+  if (g_cached_inv_plan != NULL) {
+    FFTW(destroy_plan)(g_cached_inv_plan);
+    g_cached_inv_plan = NULL;
+  }
+  g_cached_ngrid = -1;
+  g_cached_nthreads = -1;
 }
 
 static void fft_oop_cache_info(int *ngrid, int *nthreads, long long *rebuild_count)
 {
-  if (ngrid) *ngrid = -1;
-  if (nthreads) *nthreads = -1;
-  if (rebuild_count) *rebuild_count = 0;
+  if (ngrid) *ngrid = g_cached_ngrid;
+  if (nthreads) *nthreads = g_cached_nthreads;
+  if (rebuild_count) *rebuild_count = g_plan_rebuild_count;
 }
 
 static void fft_set_wisdom_path(const char *path)
 {
-  (void)path;
+  char *new_path = NULL;
+  if (path != NULL && path[0] != '\0') {
+    size_t n = strlen(path);
+    new_path = (char *)malloc(n + 1);
+    if (new_path == NULL) {
+      return;
+    }
+    memcpy(new_path, path, n + 1);
+  }
+
+  if (g_wisdom_path != NULL) {
+    free(g_wisdom_path);
+  }
+  g_wisdom_path = new_path;
+  g_wisdom_loaded_for_path = 0;
+  fft_try_load_wisdom();
 }
 
 static PyObject *core_clear_plan_cache(PyObject *self, PyObject *args)
@@ -436,7 +552,6 @@ fft_real *compute_Ik(fft_complex *density_mesh_fourier, int ngrid, float Lbox, f
       return NULL;
   }
   FFTW(execute_dft_c2r)(inv_plan, masked_density_mesh_fourier, masked_density_mesh_real);
-  FFTW(destroy_plan)(inv_plan);
   free(masked_density_mesh_fourier);
   return masked_density_mesh_real;
 }
@@ -546,7 +661,6 @@ static PyObject *core_compute_raw_bispectrum(PyObject * self, PyObject * args)
     return NULL;
   }
   FFTW(execute_dft_r2c)(fwd_plan, (fft_real *)PyArray_DATA(mesh_array_real), density_mesh_fourier);
-  FFTW(destroy_plan)(fwd_plan);
 
   // Create the raw bispectrum output array
   npy_intp out_dims[1] = { (npy_intp)n_of_kbins };
