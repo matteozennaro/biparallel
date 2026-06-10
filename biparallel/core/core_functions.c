@@ -321,44 +321,65 @@ fft_complex *apply_mask(fft_complex *density_mesh_fourier, int ngrid, float Lbox
   return masked_density_mesh_fourier;
 }
 
-static int apply_mask_into_buffer(const fft_complex *density_mesh_fourier, fft_complex *masked_density_mesh_fourier,
-                                  int ngrid, float Lbox, float kmin_bin, float kmax_bin)
+
+static float *build_k_mag2_grid(int ngrid, float Lbox)
 {
   size_t nfour = (size_t)ngrid * (size_t)ngrid * (size_t)(ngrid / 2 + 1);
-  if (density_mesh_fourier == NULL || masked_density_mesh_fourier == NULL) {
+  float *k_mag2_grid = (float *)malloc(sizeof(float) * nfour);
+  if (k_mag2_grid == NULL) {
+    return NULL;
+  }
+
+  float dk = 2.0f * M_PI / Lbox;
+  int nz = ngrid / 2 + 1;
+#ifdef _OPENMP
+#pragma omp parallel for schedule(static)
+#endif
+  for (int i = 0; i < ngrid; i++) {
+    float kx = modulus(i, ngrid) * dk;
+    float kx2 = kx * kx;
+    for (int j = 0; j < ngrid; j++) {
+      float ky = modulus(j, ngrid) * dk;
+      float ky2 = ky * ky;
+      size_t base = (size_t)nz * ((size_t)ngrid * (size_t)j + (size_t)i);
+      for (int k = 0; k < nz; k++) {
+        float kz = k * dk;
+        k_mag2_grid[base + (size_t)k] = kx2 + ky2 + kz * kz;
+      }
+    }
+  }
+
+  return k_mag2_grid;
+}
+
+static int apply_mask_into_buffer_precomputed(const fft_complex *density_mesh_fourier, fft_complex *masked_density_mesh_fourier,
+                                              const float *k_mag2_grid, int ngrid, float kmin_bin, float kmax_bin)
+{
+  size_t nfour = (size_t)ngrid * (size_t)ngrid * (size_t)(ngrid / 2 + 1);
+  if (density_mesh_fourier == NULL || masked_density_mesh_fourier == NULL || k_mag2_grid == NULL) {
     return -1;
   }
 
   memcpy(masked_density_mesh_fourier, density_mesh_fourier, sizeof(fft_complex) * nfour);
 
-  float dk = 2.0f * M_PI / Lbox;
   float kmin2 = kmin_bin * kmin_bin;
   float kmax2 = kmax_bin * kmax_bin;
-  int nz = ngrid / 2 + 1;
-
-  for (int i = 0; i < ngrid; i++) {
-    float kx = modulus(i, ngrid) * dk;
-    for (int j = 0; j < ngrid; j++) {
-      float ky = modulus(j, ngrid) * dk;
-      for (int k = 0; k < nz; k++) {
-        float kz = k * dk;
-        float k_mag2 = kx * kx + ky * ky + kz * kz;
-        if (k_mag2 < kmin2 || k_mag2 >= kmax2) {
-          unsigned long long idx = (unsigned long long)nz * ((unsigned long long)ngrid * (unsigned long long)j + (unsigned long long)i) + (unsigned long long)k;
-          masked_density_mesh_fourier[idx] = 0.0f + 0.0f * I;
-        }
-      }
+  for (size_t idx = 0; idx < nfour; idx++) {
+    float kval2 = k_mag2_grid[idx];
+    if (kval2 < kmin2 || kval2 >= kmax2) {
+      masked_density_mesh_fourier[idx] = 0.0f + 0.0f * I;
     }
   }
 
   return 0;
 }
 
-static int compute_Ik_with_workspace(const fft_complex *density_mesh_fourier, fft_complex *masked_workspace,
-                                     fft_real *real_workspace, FFTW(plan) inv_plan,
-                                     int ngrid, float Lbox, float kmin_bin, float kmax_bin)
+static int compute_Ik_with_workspace_precomputed(const fft_complex *density_mesh_fourier, fft_complex *masked_workspace,
+                                                 fft_real *real_workspace, FFTW(plan) inv_plan,
+                                                 const float *k_mag2_grid, int ngrid,
+                                                 float kmin_bin, float kmax_bin)
 {
-  if (apply_mask_into_buffer(density_mesh_fourier, masked_workspace, ngrid, Lbox, kmin_bin, kmax_bin) != 0) {
+  if (apply_mask_into_buffer_precomputed(density_mesh_fourier, masked_workspace, k_mag2_grid, ngrid, kmin_bin, kmax_bin) != 0) {
     return -1;
   }
   FFTW(execute_dft_c2r)(inv_plan, masked_workspace, real_workspace);
@@ -543,8 +564,63 @@ static PyObject *core_compute_raw_bispectrum(PyObject * self, PyObject * args)
     return NULL;
   }
 
-  // Compute the Ik array for each k-bin
   int ngrid = (int)PyArray_DIM(mesh_array_real, 0);
+  int total_cells = ngrid * ngrid * ngrid;
+  size_t nfour = (size_t)ngrid * (size_t)ngrid * (size_t)(ngrid / 2 + 1);
+  size_t nreal = (size_t)ngrid * (size_t)ngrid * (size_t)ngrid;
+
+  float *k_mag2_grid = build_k_mag2_grid(ngrid, Lbox);
+  fft_complex *masked_workspace = (fft_complex *)FFTW(malloc)(sizeof(fft_complex) * nfour);
+  fft_real *ik1_workspace = (fft_real *)FFTW(malloc)(sizeof(fft_real) * nreal);
+  fft_real *ik2_workspace = (fft_real *)FFTW(malloc)(sizeof(fft_real) * nreal);
+  fft_real *ik3_workspace = (fft_real *)FFTW(malloc)(sizeof(fft_real) * nreal);
+  FFTW(plan) inv_plan = NULL;
+
+  if (k_mag2_grid == NULL || masked_workspace == NULL || ik1_workspace == NULL || ik2_workspace == NULL || ik3_workspace == NULL) {
+    PyErr_SetString(PyExc_RuntimeError, "Error allocating bispectrum workspaces");
+    if (masked_workspace != NULL) FFTW(free)(masked_workspace);
+    if (ik1_workspace != NULL) FFTW(free)(ik1_workspace);
+    if (ik2_workspace != NULL) FFTW(free)(ik2_workspace);
+    if (ik3_workspace != NULL) FFTW(free)(ik3_workspace);
+    free(k_mag2_grid);
+    free(density_mesh_fourier);
+    Py_DECREF(k1min_arr);
+    Py_DECREF(k1max_arr);
+    Py_DECREF(k2min_arr);
+    Py_DECREF(k2max_arr);
+    Py_DECREF(k3min_arr);
+    Py_DECREF(k3max_arr);
+    Py_DECREF(mesh_array_real);
+    Py_DECREF(bispectrum_array);
+    return NULL;
+  }
+
+  inv_plan = FFTW(plan_dft_c2r_3d)(ngrid, ngrid, ngrid, masked_workspace, ik1_workspace, FFTW_ESTIMATE);
+  if (inv_plan == NULL) {
+    PyErr_SetString(PyExc_RuntimeError, "Error creating inverse FFT plan");
+    FFTW(free)(masked_workspace);
+    FFTW(free)(ik1_workspace);
+    FFTW(free)(ik2_workspace);
+    FFTW(free)(ik3_workspace);
+    free(k_mag2_grid);
+    free(density_mesh_fourier);
+    Py_DECREF(k1min_arr);
+    Py_DECREF(k1max_arr);
+    Py_DECREF(k2min_arr);
+    Py_DECREF(k2max_arr);
+    Py_DECREF(k3min_arr);
+    Py_DECREF(k3max_arr);
+    Py_DECREF(mesh_array_real);
+    Py_DECREF(bispectrum_array);
+    return NULL;
+  }
+
+  int ik_error = -1;
+  float prev_k1min = 0.0f, prev_k1max = 0.0f;
+  float prev_k2min = 0.0f, prev_k2max = 0.0f;
+  float prev_k3min = 0.0f, prev_k3max = 0.0f;
+  int has_k1 = 0, has_k2 = 0, has_k3 = 0;
+
   for (int i = 0; i < n_of_kbins; i++) {
     float k1min = k1min_bin[i];
     float k1max = k1max_bin[i];
@@ -552,35 +628,63 @@ static PyObject *core_compute_raw_bispectrum(PyObject * self, PyObject * args)
     float k2max = k2max_bin[i];
     float k3min = k3min_bin[i];
     float k3max = k3max_bin[i];
-    fft_real *Ik1 = compute_Ik(density_mesh_fourier, ngrid, Lbox, k1min, k1max, nthreads);
-    fft_real *Ik2 = compute_Ik(density_mesh_fourier, ngrid, Lbox, k2min, k2max, nthreads);
-    fft_real *Ik3 = compute_Ik(density_mesh_fourier, ngrid, Lbox, k3min, k3max, nthreads);
-    if (Ik1 == NULL || Ik2 == NULL || Ik3 == NULL) {
-      PyErr_Format(PyExc_RuntimeError, "Error computing Ik for bin %d", i);
-      if (Ik1) free(Ik1);
-      if (Ik2) free(Ik2);
-      if (Ik3) free(Ik3);
-        free(density_mesh_fourier);
-        Py_DECREF(k1min_arr);
-        Py_DECREF(k1max_arr);
-        Py_DECREF(k2min_arr);
-        Py_DECREF(k2max_arr);
-        Py_DECREF(k3min_arr);
-        Py_DECREF(k3max_arr);
-        Py_DECREF(mesh_array_real);
-        return NULL;
+
+    if (!has_k1 || k1min != prev_k1min || k1max != prev_k1max) {
+      if (compute_Ik_with_workspace_precomputed(density_mesh_fourier, masked_workspace, ik1_workspace, inv_plan, k_mag2_grid, ngrid, k1min, k1max) != 0) {
+        ik_error = i;
+        break;
+      }
+      prev_k1min = k1min;
+      prev_k1max = k1max;
+      has_k1 = 1;
+    }
+    if (!has_k2 || k2min != prev_k2min || k2max != prev_k2max) {
+      if (compute_Ik_with_workspace_precomputed(density_mesh_fourier, masked_workspace, ik2_workspace, inv_plan, k_mag2_grid, ngrid, k2min, k2max) != 0) {
+        ik_error = i;
+        break;
+      }
+      prev_k2min = k2min;
+      prev_k2max = k2max;
+      has_k2 = 1;
+    }
+    if (!has_k3 || k3min != prev_k3min || k3max != prev_k3max) {
+      if (compute_Ik_with_workspace_precomputed(density_mesh_fourier, masked_workspace, ik3_workspace, inv_plan, k_mag2_grid, ngrid, k3min, k3max) != 0) {
+        ik_error = i;
+        break;
+      }
+      prev_k3min = k3min;
+      prev_k3max = k3max;
+      has_k3 = 1;
     }
 
     // Compute the raw bispectrum for this k-bin
     double bispectrum_value = 0.0;
-    for (int j = 0; j < ngrid * ngrid * ngrid; j++) {
-        bispectrum_value += Ik1[j] * Ik2[j] * Ik3[j];
+#pragma omp simd reduction(+:bispectrum_value)
+    for (int j = 0; j < total_cells; j++) {
+        bispectrum_value += ik1_workspace[j] * ik2_workspace[j] * ik3_workspace[j];
     }
     ((float *)PyArray_DATA(bispectrum_array))[i] = (float)bispectrum_value;
+  }
 
-    free(Ik1);
-    free(Ik2);
-    free(Ik3);
+  FFTW(destroy_plan)(inv_plan);
+  FFTW(free)(masked_workspace);
+  FFTW(free)(ik1_workspace);
+  FFTW(free)(ik2_workspace);
+  FFTW(free)(ik3_workspace);
+  free(k_mag2_grid);
+
+  if (ik_error >= 0) {
+    PyErr_Format(PyExc_RuntimeError, "Error computing Ik for bin %d", ik_error);
+    Py_DECREF(bispectrum_array);
+    free(density_mesh_fourier);
+    Py_DECREF(k1min_arr);
+    Py_DECREF(k1max_arr);
+    Py_DECREF(k2min_arr);
+    Py_DECREF(k2max_arr);
+    Py_DECREF(k3min_arr);
+    Py_DECREF(k3max_arr);
+    Py_DECREF(mesh_array_real);
+    return NULL;
   }
 
   Py_DECREF(k1min_arr);
@@ -605,6 +709,7 @@ static PyObject *core_compute_normalization(PyObject * self, PyObject * args)
   }
 
   (void)verbose;
+  (void)nthreads;
 
   PyArrayObject *k1min_arr = (PyArrayObject *)PyArray_FROM_OTF(k1min_bin_obj, NPY_FLOAT32, NPY_ARRAY_IN_ARRAY);
   PyArrayObject *k1max_arr = (PyArrayObject *)PyArray_FROM_OTF(k1max_bin_obj, NPY_FLOAT32, NPY_ARRAY_IN_ARRAY);
@@ -663,6 +768,50 @@ static PyObject *core_compute_normalization(PyObject * self, PyObject * args)
   float *k3min_bin = (float *)PyArray_DATA(k3min_arr);
   float *k3max_bin = (float *)PyArray_DATA(k3max_arr);
 
+  float *k_mag2_grid = build_k_mag2_grid(ngrid, Lbox);
+  size_t nfour = (size_t)ngrid * (size_t)ngrid * (size_t)(ngrid / 2 + 1);
+  size_t nreal = (size_t)ngrid * (size_t)ngrid * (size_t)ngrid;
+  fft_complex *masked_workspace = (fft_complex *)FFTW(malloc)(sizeof(fft_complex) * nfour);
+  fft_real *ik1_workspace = (fft_real *)FFTW(malloc)(sizeof(fft_real) * nreal);
+  fft_real *ik2_workspace = (fft_real *)FFTW(malloc)(sizeof(fft_real) * nreal);
+  fft_real *ik3_workspace = (fft_real *)FFTW(malloc)(sizeof(fft_real) * nreal);
+  FFTW(plan) inv_plan = NULL;
+
+  if (k_mag2_grid == NULL || masked_workspace == NULL || ik1_workspace == NULL || ik2_workspace == NULL || ik3_workspace == NULL) {
+    PyErr_SetString(PyExc_RuntimeError, "Error allocating normalization workspaces");
+    if (masked_workspace != NULL) FFTW(free)(masked_workspace);
+    if (ik1_workspace != NULL) FFTW(free)(ik1_workspace);
+    if (ik2_workspace != NULL) FFTW(free)(ik2_workspace);
+    if (ik3_workspace != NULL) FFTW(free)(ik3_workspace);
+    free(k_mag2_grid);
+    free(dummy_density_mesh_fourier);
+    Py_DECREF(k1min_arr);
+    Py_DECREF(k1max_arr);
+    Py_DECREF(k2min_arr);
+    Py_DECREF(k2max_arr);
+    Py_DECREF(k3min_arr);
+    Py_DECREF(k3max_arr);
+    return NULL;
+  }
+
+  inv_plan = FFTW(plan_dft_c2r_3d)(ngrid, ngrid, ngrid, masked_workspace, ik1_workspace, FFTW_ESTIMATE);
+  if (inv_plan == NULL) {
+    PyErr_SetString(PyExc_RuntimeError, "Error creating inverse FFT plan");
+    FFTW(free)(masked_workspace);
+    FFTW(free)(ik1_workspace);
+    FFTW(free)(ik2_workspace);
+    FFTW(free)(ik3_workspace);
+    free(k_mag2_grid);
+    free(dummy_density_mesh_fourier);
+    Py_DECREF(k1min_arr);
+    Py_DECREF(k1max_arr);
+    Py_DECREF(k2min_arr);
+    Py_DECREF(k2max_arr);
+    Py_DECREF(k3min_arr);
+    Py_DECREF(k3max_arr);
+    return NULL;
+  }
+
   // Create the normalization output array
   npy_intp out_dims[1] = { (npy_intp)PyArray_SIZE(k1min_arr) };
   PyArrayObject *normalization_array = (PyArrayObject *)PyArray_EMPTY(1, out_dims, NPY_FLOAT, 0);
@@ -675,10 +824,23 @@ static PyObject *core_compute_normalization(PyObject * self, PyObject * args)
     Py_DECREF(k2max_arr);
     Py_DECREF(k3min_arr);
     Py_DECREF(k3max_arr);
+    FFTW(destroy_plan)(inv_plan);
+    FFTW(free)(masked_workspace);
+    FFTW(free)(ik1_workspace);
+    FFTW(free)(ik2_workspace);
+    FFTW(free)(ik3_workspace);
+    free(k_mag2_grid);
     return NULL;
   }
 
   // Compute the normalization factor for each k-bin
+  int total_cells = ngrid * ngrid * ngrid;
+  int ik_error = -1;
+  float prev_k1min = 0.0f, prev_k1max = 0.0f;
+  float prev_k2min = 0.0f, prev_k2max = 0.0f;
+  float prev_k3min = 0.0f, prev_k3max = 0.0f;
+  int has_k1 = 0, has_k2 = 0, has_k3 = 0;
+
   for (int i = 0; i < n_of_kbins; i++) {
     float k1min = k1min_bin[i];
     float k1max = k1max_bin[i];
@@ -686,33 +848,61 @@ static PyObject *core_compute_normalization(PyObject * self, PyObject * args)
     float k2max = k2max_bin[i];
     float k3min = k3min_bin[i];
     float k3max = k3max_bin[i];
-    fft_real *Ik1 = compute_Ik(dummy_density_mesh_fourier, ngrid, Lbox, k1min, k1max, nthreads);
-    fft_real *Ik2 = compute_Ik(dummy_density_mesh_fourier, ngrid, Lbox, k2min, k2max, nthreads);
-    fft_real *Ik3 = compute_Ik(dummy_density_mesh_fourier, ngrid, Lbox, k3min, k3max, nthreads);
-    if (Ik1 == NULL || Ik2 == NULL || Ik3 == NULL) {
-      PyErr_Format(PyExc_RuntimeError, "Error computing Ik for bin %d", i);
-      if (Ik1) free(Ik1);
-      if (Ik2) free(Ik2);
-      if (Ik3) free(Ik3);
-        free(dummy_density_mesh_fourier);
-        Py_DECREF(k1min_arr);
-        Py_DECREF(k1max_arr);
-        Py_DECREF(k2min_arr);
-        Py_DECREF(k2max_arr);
-        Py_DECREF(k3min_arr);
-        Py_DECREF(k3max_arr);
-        return NULL;
+
+    if (!has_k1 || k1min != prev_k1min || k1max != prev_k1max) {
+      if (compute_Ik_with_workspace_precomputed(dummy_density_mesh_fourier, masked_workspace, ik1_workspace, inv_plan, k_mag2_grid, ngrid, k1min, k1max) != 0) {
+        ik_error = i;
+        break;
+      }
+      prev_k1min = k1min;
+      prev_k1max = k1max;
+      has_k1 = 1;
+    }
+    if (!has_k2 || k2min != prev_k2min || k2max != prev_k2max) {
+      if (compute_Ik_with_workspace_precomputed(dummy_density_mesh_fourier, masked_workspace, ik2_workspace, inv_plan, k_mag2_grid, ngrid, k2min, k2max) != 0) {
+        ik_error = i;
+        break;
+      }
+      prev_k2min = k2min;
+      prev_k2max = k2max;
+      has_k2 = 1;
+    }
+    if (!has_k3 || k3min != prev_k3min || k3max != prev_k3max) {
+      if (compute_Ik_with_workspace_precomputed(dummy_density_mesh_fourier, masked_workspace, ik3_workspace, inv_plan, k_mag2_grid, ngrid, k3min, k3max) != 0) {
+        ik_error = i;
+        break;
+      }
+      prev_k3min = k3min;
+      prev_k3max = k3max;
+      has_k3 = 1;
     }
 
     double normalization_value = 0.0;
-    for (int j = 0; j < ngrid * ngrid * ngrid; j++) {
-        normalization_value += Ik1[j] * Ik2[j] * Ik3[j];
+#pragma omp simd reduction(+:normalization_value)
+    for (int j = 0; j < total_cells; j++) {
+        normalization_value += ik1_workspace[j] * ik2_workspace[j] * ik3_workspace[j];
     }
     ((float *)PyArray_DATA(normalization_array))[i] = (float)normalization_value;
+  }
 
-    free(Ik1);
-    free(Ik2);
-    free(Ik3);
+  FFTW(destroy_plan)(inv_plan);
+  FFTW(free)(masked_workspace);
+  FFTW(free)(ik1_workspace);
+  FFTW(free)(ik2_workspace);
+  FFTW(free)(ik3_workspace);
+  free(k_mag2_grid);
+
+  if (ik_error >= 0) {
+    PyErr_Format(PyExc_RuntimeError, "Error computing Ik for bin %d", ik_error);
+    Py_DECREF(normalization_array);
+    free(dummy_density_mesh_fourier);
+    Py_DECREF(k1min_arr);
+    Py_DECREF(k1max_arr);
+    Py_DECREF(k2min_arr);
+    Py_DECREF(k2max_arr);
+    Py_DECREF(k3min_arr);
+    Py_DECREF(k3max_arr);
+    return NULL;
   }
 
   free(dummy_density_mesh_fourier);
@@ -876,6 +1066,23 @@ static PyObject *core_compute_effective_triangles(PyObject * self, PyObject * ar
   int worker_threads = (nthreads > 0) ? nthreads : 1;
   size_t nfour = (size_t)ngrid * (size_t)ngrid * (size_t)(ngrid / 2 + 1);
   size_t nreal = (size_t)ngrid * (size_t)ngrid * (size_t)ngrid;
+  float *k_mag2_grid = build_k_mag2_grid(ngrid, Lbox);
+
+  if (k_mag2_grid == NULL) {
+    PyErr_SetString(PyExc_RuntimeError, "Error allocating k-space magnitude workspace");
+    free(dummy_density_mesh_fourier);
+    free(k_mesh_fourier);
+    Py_DECREF(k1_eff);
+    Py_DECREF(k2_eff);
+    Py_DECREF(k3_eff);
+    Py_DECREF(k1min_arr);
+    Py_DECREF(k1max_arr);
+    Py_DECREF(k2min_arr);
+    Py_DECREF(k2max_arr);
+    Py_DECREF(k3min_arr);
+    Py_DECREF(k3max_arr);
+    return NULL;
+  }
 
 #ifdef _OPENMP
   omp_sched_t sched_kind;
@@ -928,10 +1135,10 @@ static PyObject *core_compute_effective_triangles(PyObject * self, PyObject * ar
         float k3min = k3min_bin[i];
         float k3max = k3max_bin[i];
 
-        if (compute_Ik_with_workspace(dummy_density_mesh_fourier, masked_workspace, ik1_workspace, inv_plan, ngrid, Lbox, k1min, k1max) != 0 ||
-            compute_Ik_with_workspace(dummy_density_mesh_fourier, masked_workspace, ik2_workspace, inv_plan, ngrid, Lbox, k2min, k2max) != 0 ||
-            compute_Ik_with_workspace(dummy_density_mesh_fourier, masked_workspace, ik3_workspace, inv_plan, ngrid, Lbox, k3min, k3max) != 0 ||
-            compute_Ik_with_workspace(k_mesh_fourier, masked_workspace, iq_workspace, inv_plan, ngrid, Lbox, k1min, k1max) != 0) {
+        if (compute_Ik_with_workspace_precomputed(dummy_density_mesh_fourier, masked_workspace, ik1_workspace, inv_plan, k_mag2_grid, ngrid, k1min, k1max) != 0 ||
+          compute_Ik_with_workspace_precomputed(dummy_density_mesh_fourier, masked_workspace, ik2_workspace, inv_plan, k_mag2_grid, ngrid, k2min, k2max) != 0 ||
+          compute_Ik_with_workspace_precomputed(dummy_density_mesh_fourier, masked_workspace, ik3_workspace, inv_plan, k_mag2_grid, ngrid, k3min, k3max) != 0 ||
+          compute_Ik_with_workspace_precomputed(k_mesh_fourier, masked_workspace, iq_workspace, inv_plan, k_mag2_grid, ngrid, k1min, k1max) != 0) {
 #pragma omp critical
           {
             if (!bin_error) {
@@ -950,7 +1157,7 @@ static PyObject *core_compute_effective_triangles(PyObject * self, PyObject * ar
           k1eff_value += iq_workspace[j] * ik2_workspace[j] * ik3_workspace[j];
         }
 
-        if (compute_Ik_with_workspace(k_mesh_fourier, masked_workspace, iq_workspace, inv_plan, ngrid, Lbox, k2min, k2max) != 0) {
+        if (compute_Ik_with_workspace_precomputed(k_mesh_fourier, masked_workspace, iq_workspace, inv_plan, k_mag2_grid, ngrid, k2min, k2max) != 0) {
 #pragma omp critical
           {
             if (!bin_error) {
@@ -965,7 +1172,7 @@ static PyObject *core_compute_effective_triangles(PyObject * self, PyObject * ar
           k2eff_value += ik1_workspace[j] * iq_workspace[j] * ik3_workspace[j];
         }
 
-        if (compute_Ik_with_workspace(k_mesh_fourier, masked_workspace, iq_workspace, inv_plan, ngrid, Lbox, k3min, k3max) != 0) {
+        if (compute_Ik_with_workspace_precomputed(k_mesh_fourier, masked_workspace, iq_workspace, inv_plan, k_mag2_grid, ngrid, k3min, k3max) != 0) {
 #pragma omp critical
           {
             if (!bin_error) {
@@ -1035,10 +1242,10 @@ static PyObject *core_compute_effective_triangles(PyObject * self, PyObject * ar
       float k3min = k3min_bin[i];
       float k3max = k3max_bin[i];
 
-      if (compute_Ik_with_workspace(dummy_density_mesh_fourier, masked_workspace, ik1_workspace, inv_plan, ngrid, Lbox, k1min, k1max) != 0 ||
-          compute_Ik_with_workspace(dummy_density_mesh_fourier, masked_workspace, ik2_workspace, inv_plan, ngrid, Lbox, k2min, k2max) != 0 ||
-          compute_Ik_with_workspace(dummy_density_mesh_fourier, masked_workspace, ik3_workspace, inv_plan, ngrid, Lbox, k3min, k3max) != 0 ||
-          compute_Ik_with_workspace(k_mesh_fourier, masked_workspace, iq_workspace, inv_plan, ngrid, Lbox, k1min, k1max) != 0) {
+        if (compute_Ik_with_workspace_precomputed(dummy_density_mesh_fourier, masked_workspace, ik1_workspace, inv_plan, k_mag2_grid, ngrid, k1min, k1max) != 0 ||
+          compute_Ik_with_workspace_precomputed(dummy_density_mesh_fourier, masked_workspace, ik2_workspace, inv_plan, k_mag2_grid, ngrid, k2min, k2max) != 0 ||
+          compute_Ik_with_workspace_precomputed(dummy_density_mesh_fourier, masked_workspace, ik3_workspace, inv_plan, k_mag2_grid, ngrid, k3min, k3max) != 0 ||
+          compute_Ik_with_workspace_precomputed(k_mesh_fourier, masked_workspace, iq_workspace, inv_plan, k_mag2_grid, ngrid, k1min, k1max) != 0) {
         bin_error = 1;
         error_bin = i;
         break;
@@ -1051,7 +1258,7 @@ static PyObject *core_compute_effective_triangles(PyObject * self, PyObject * ar
         k1eff_value += iq_workspace[j] * ik2_workspace[j] * ik3_workspace[j];
       }
 
-      if (compute_Ik_with_workspace(k_mesh_fourier, masked_workspace, iq_workspace, inv_plan, ngrid, Lbox, k2min, k2max) != 0) {
+      if (compute_Ik_with_workspace_precomputed(k_mesh_fourier, masked_workspace, iq_workspace, inv_plan, k_mag2_grid, ngrid, k2min, k2max) != 0) {
         bin_error = 1;
         error_bin = i;
         break;
@@ -1060,7 +1267,7 @@ static PyObject *core_compute_effective_triangles(PyObject * self, PyObject * ar
         k2eff_value += ik1_workspace[j] * iq_workspace[j] * ik3_workspace[j];
       }
 
-      if (compute_Ik_with_workspace(k_mesh_fourier, masked_workspace, iq_workspace, inv_plan, ngrid, Lbox, k3min, k3max) != 0) {
+      if (compute_Ik_with_workspace_precomputed(k_mesh_fourier, masked_workspace, iq_workspace, inv_plan, k_mag2_grid, ngrid, k3min, k3max) != 0) {
         bin_error = 1;
         error_bin = i;
         break;
@@ -1103,6 +1310,7 @@ static PyObject *core_compute_effective_triangles(PyObject * self, PyObject * ar
     }
     free(dummy_density_mesh_fourier);
     free(k_mesh_fourier);
+    free(k_mag2_grid);
     Py_DECREF(k1_eff);
     Py_DECREF(k2_eff);
     Py_DECREF(k3_eff);
@@ -1117,6 +1325,7 @@ static PyObject *core_compute_effective_triangles(PyObject * self, PyObject * ar
 
   free(dummy_density_mesh_fourier);
   free(k_mesh_fourier);
+  free(k_mag2_grid);
   Py_DECREF(k1min_arr);
   Py_DECREF(k1max_arr);
   Py_DECREF(k2min_arr);
