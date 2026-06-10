@@ -183,34 +183,34 @@ static PyObject *core_clear_plan_cache(PyObject *self, PyObject *args)
 
 static PyObject *core_plan_cache_info(PyObject *self, PyObject *args)
 {
-    (void)self; (void)args;
-    int ng = -1, nt = -1;
-    long long rc = 0;
-    fft_oop_cache_info(&ng, &nt, &rc);
-    return Py_BuildValue("(iiL)", ng, nt, rc);
+  (void)self; (void)args;
+  int ng = -1, nt = -1;
+  long long rc = 0;
+  fft_oop_cache_info(&ng, &nt, &rc);
+  return Py_BuildValue("(iiL)", ng, nt, rc);
 }
 
 static FFTW(plan) power_get_forward_plan(int ngrid, int nthreads)
 {
-    FFTW(plan) f = NULL;
-    fft_oop_get_plans(ngrid, nthreads, &f, NULL);
-    return f;
+  FFTW(plan) f = NULL;
+  fft_oop_get_plans(ngrid, nthreads, &f, NULL);
+  return f;
 }
 
 static FFTW(plan) power_get_inverse_plan(int ngrid, int nthreads)
 {
-    FFTW(plan) i = NULL;
-    fft_oop_get_plans(ngrid, nthreads, NULL, &i);
-    return i;
+  FFTW(plan) i = NULL;
+  fft_oop_get_plans(ngrid, nthreads, NULL, &i);
+  return i;
 }
 
 static PyObject *core_set_wisdom_path(PyObject *self, PyObject *args)
 {
-    const char *path;
-    if (!PyArg_ParseTuple(args, "s", &path))
-        return NULL;
-    fft_set_wisdom_path(path);
-    Py_RETURN_NONE;
+  const char *path;
+  if (!PyArg_ParseTuple(args, "s", &path))
+      return NULL;
+  fft_set_wisdom_path(path);
+  Py_RETURN_NONE;
 }
 
 int inv_modulus(double kx, int ngrid)
@@ -227,7 +227,7 @@ int inv_modulus(double kx, int ngrid)
 
 static PyObject *core_check_precision(PyObject * self, PyObject * args)
 {
-    return Py_BuildValue("i",sizeof(fft_real));
+  return Py_BuildValue("i",sizeof(fft_real));
 }
 
 int modulus(int x, int ngrid)
@@ -275,37 +275,37 @@ float periodic_wrap(float x0, float box)
 
 /* Morton key helpers for spatial sub-sorting within slabs */
 static inline unsigned int spread_bits_8(unsigned int v) {
-    v = (v | (v << 8)) & 0x00FF00FF;
-    v = (v | (v << 4)) & 0x0F0F0F0F;
-    v = (v | (v << 2)) & 0x33333333;
-    v = (v | (v << 1)) & 0x55555555;
-    return v;
+  v = (v | (v << 8)) & 0x00FF00FF;
+  v = (v | (v << 4)) & 0x0F0F0F0F;
+  v = (v | (v << 2)) & 0x33333333;
+  v = (v | (v << 1)) & 0x55555555;
+  return v;
 }
 
 static inline unsigned short morton_2d_8bit(unsigned char y, unsigned char z) {
-    return (unsigned short)(spread_bits_8(z) | (spread_bits_8(y) << 1));
+  return (unsigned short)(spread_bits_8(z) | (spread_bits_8(y) << 1));
 }
 
 fft_complex *apply_mask(fft_complex *density_mesh_fourier, int ngrid, float Lbox, float kmin_bin, float kmax_bin, int nthreads)
 {
-    // Create a copy of the input array to apply the mask to
-    fft_complex *masked_density_mesh_fourier = (fft_complex *)malloc(sizeof(fft_complex) * ngrid * ngrid * (ngrid / 2 + 1));
-    if (masked_density_mesh_fourier == NULL) {
-        fprintf(stderr, "Error allocating memory for masked_density_mesh_fourier\n");
-        return NULL;
-    }
-    memcpy(masked_density_mesh_fourier, density_mesh_fourier, sizeof(fft_complex) * ngrid * ngrid * (ngrid / 2 + 1));
+  // Create a copy of the input array to apply the mask to
+  fft_complex *masked_density_mesh_fourier = (fft_complex *)malloc(sizeof(fft_complex) * ngrid * ngrid * (ngrid / 2 + 1));
+  if (masked_density_mesh_fourier == NULL) {
+      fprintf(stderr, "Error allocating memory for masked_density_mesh_fourier\n");
+      return NULL;
+  }
+  memcpy(masked_density_mesh_fourier, density_mesh_fourier, sizeof(fft_complex) * ngrid * ngrid * (ngrid / 2 + 1));
 
-    float dk = 2.0f * M_PI / Lbox;
-    float kmin2 = kmin_bin * kmin_bin;
-    float kmax2 = kmax_bin * kmax_bin;
-    int nz = ngrid / 2 + 1;
-  #ifdef _OPENMP
-  #pragma omp parallel for collapse(2) schedule(static) num_threads(nthreads > 0 ? nthreads : 1)
-  #endif
-    for (int i = 0; i < ngrid; i++) {
-      for (int j = 0; j < ngrid; j++) {
-          float kx = modulus(i, ngrid) * dk;
+  float dk = 2.0f * M_PI / Lbox;
+  float kmin2 = kmin_bin * kmin_bin;
+  float kmax2 = kmax_bin * kmax_bin;
+  int nz = ngrid / 2 + 1;
+#ifdef _OPENMP
+#pragma omp parallel for collapse(2) schedule(static) num_threads(nthreads > 0 ? nthreads : 1)
+#endif
+  for (int i = 0; i < ngrid; i++) {
+    for (int j = 0; j < ngrid; j++) {
+        float kx = modulus(i, ngrid) * dk;
         float ky = modulus(j, ngrid) * dk;
         for (int k = 0; k < nz; k++) {
           float kz = k * dk;
@@ -313,201 +313,105 @@ fft_complex *apply_mask(fft_complex *density_mesh_fourier, int ngrid, float Lbox
           if (k_mag2 < kmin2 || k_mag2 >= kmax2) {
             unsigned long long idx = (unsigned long long)nz * ((unsigned long long)ngrid * (unsigned long long)j + (unsigned long long)i) + (unsigned long long)k;
             masked_density_mesh_fourier[idx] = 0.0f + 0.0f * I;
-          }
         }
       }
     }
-    return masked_density_mesh_fourier;
+  }
+  return masked_density_mesh_fourier;
 }
 
 fft_real *compute_Ik(fft_complex *density_mesh_fourier, int ngrid, float Lbox, float kmin_bin, float kmax_bin, int nthreads)
 {
-    // Apply the mask to the density mesh in Fourier space
+  // Apply the mask to the density mesh in Fourier space
   fft_complex *masked_density_mesh_fourier = apply_mask(density_mesh_fourier, ngrid, Lbox, kmin_bin, kmax_bin, nthreads);
 
-    // Compute the inverse FFT of the masked density mesh to get the masked density mesh in real space
-    fft_real *masked_density_mesh_real = (fft_real *)malloc(sizeof(fft_real) * ngrid * ngrid * ngrid);
-    if (masked_density_mesh_real == NULL) {
-        fprintf(stderr, "Error allocating memory for masked_density_mesh_real\n");
-        free(masked_density_mesh_fourier);
-        return NULL;
-    }
-    FFTW(plan) inv_plan = power_get_inverse_plan(ngrid, nthreads);
-    if (inv_plan == NULL) {
-        fprintf(stderr, "Error creating inverse FFT plan\n");
-        free(masked_density_mesh_fourier);
-        free(masked_density_mesh_real);
-        return NULL;
-    }
-    FFTW(execute_dft_c2r)(inv_plan, masked_density_mesh_fourier, masked_density_mesh_real);
-    FFTW(destroy_plan)(inv_plan);
-    free(masked_density_mesh_fourier);
-    return masked_density_mesh_real;
+  // Compute the inverse FFT of the masked density mesh to get the masked density mesh in real space
+  fft_real *masked_density_mesh_real = (fft_real *)malloc(sizeof(fft_real) * ngrid * ngrid * ngrid);
+  if (masked_density_mesh_real == NULL) {
+      fprintf(stderr, "Error allocating memory for masked_density_mesh_real\n");
+      free(masked_density_mesh_fourier);
+      return NULL;
+  }
+  FFTW(plan) inv_plan = power_get_inverse_plan(ngrid, nthreads);
+  if (inv_plan == NULL) {
+      fprintf(stderr, "Error creating inverse FFT plan\n");
+      free(masked_density_mesh_fourier);
+      free(masked_density_mesh_real);
+      return NULL;
+  }
+  FFTW(execute_dft_c2r)(inv_plan, masked_density_mesh_fourier, masked_density_mesh_real);
+  FFTW(destroy_plan)(inv_plan);
+  free(masked_density_mesh_fourier);
+  return masked_density_mesh_real;
 }
 
 static PyObject *core_compute_raw_bispectrum(PyObject * self, PyObject * args)
 {
-    int nthreads, verbose;
-    float Lbox;
-    PyObject *density_mesh_real, *k1min_bin_obj, *k1max_bin_obj, *k2min_bin_obj, *k2max_bin_obj, *k3min_bin_obj, *k3max_bin_obj;
+  int nthreads, verbose;
+  float Lbox;
+  PyObject *density_mesh_real, *k1min_bin_obj, *k1max_bin_obj, *k2min_bin_obj, *k2max_bin_obj, *k3min_bin_obj, *k3max_bin_obj;
 
-    if (!PyArg_ParseTuple(args, "OfOOOOOOii", &density_mesh_real, &Lbox, &k1min_bin_obj, &k1max_bin_obj, &k2min_bin_obj, &k2max_bin_obj, &k3min_bin_obj, &k3max_bin_obj, &nthreads, &verbose)) {
-        return NULL;
+  if (!PyArg_ParseTuple(args, "OfOOOOOOii", &density_mesh_real, &Lbox, &k1min_bin_obj, &k1max_bin_obj, &k2min_bin_obj, &k2max_bin_obj, &k3min_bin_obj, &k3max_bin_obj, &nthreads, &verbose)) {
+      return NULL;
+  }
+
+  PyArrayObject *mesh_array_real = (PyArrayObject *)PyArray_FROM_OTF(
+      density_mesh_real, NP_OUT_TYPE, NPY_ARRAY_IN_ARRAY);
+  if (mesh_array_real == NULL) {
+      return NULL;
+  }
+
+  PyArrayObject *k1min_arr = (PyArrayObject *)PyArray_FROM_OTF(k1min_bin_obj, NPY_FLOAT32, NPY_ARRAY_IN_ARRAY);
+  PyArrayObject *k1max_arr = (PyArrayObject *)PyArray_FROM_OTF(k1max_bin_obj, NPY_FLOAT32, NPY_ARRAY_IN_ARRAY);
+  PyArrayObject *k2min_arr = (PyArrayObject *)PyArray_FROM_OTF(k2min_bin_obj, NPY_FLOAT32, NPY_ARRAY_IN_ARRAY);
+  PyArrayObject *k2max_arr = (PyArrayObject *)PyArray_FROM_OTF(k2max_bin_obj, NPY_FLOAT32, NPY_ARRAY_IN_ARRAY);
+  PyArrayObject *k3min_arr = (PyArrayObject *)PyArray_FROM_OTF(k3min_bin_obj, NPY_FLOAT32, NPY_ARRAY_IN_ARRAY);
+  PyArrayObject *k3max_arr = (PyArrayObject *)PyArray_FROM_OTF(k3max_bin_obj, NPY_FLOAT32, NPY_ARRAY_IN_ARRAY);
+  if (k1min_arr == NULL || k1max_arr == NULL || k2min_arr == NULL || k2max_arr == NULL || k3min_arr == NULL || k3max_arr == NULL) {
+      Py_XDECREF(k1min_arr);
+      Py_XDECREF(k1max_arr);
+      Py_XDECREF(k2min_arr);
+      Py_XDECREF(k2max_arr);
+      Py_XDECREF(k3min_arr);
+      Py_XDECREF(k3max_arr);
+      Py_DECREF(mesh_array_real);
+      return NULL;
+  }
+
+  if (PyArray_NDIM(k1min_arr) != 1 || PyArray_NDIM(k1max_arr) != 1 ||
+      PyArray_NDIM(k2min_arr) != 1 || PyArray_NDIM(k2max_arr) != 1 ||
+      PyArray_NDIM(k3min_arr) != 1 || PyArray_NDIM(k3max_arr) != 1) {
+      PyErr_SetString(PyExc_ValueError, "All k-bin inputs must be 1D float arrays");
+      Py_DECREF(k1min_arr);
+      Py_DECREF(k1max_arr);
+      Py_DECREF(k2min_arr);
+      Py_DECREF(k2max_arr);
+      Py_DECREF(k3min_arr);
+      Py_DECREF(k3max_arr);
+      Py_DECREF(mesh_array_real);
+      return NULL;
+  }
+
+  if (verbose) {
+    int ndim = PyArray_NDIM(mesh_array_real);
+    npy_intp *dims = PyArray_DIMS(mesh_array_real);
+    int i;
+    printf("density_mesh ndim=%d shape=(", ndim);
+    for (i = 0; i < ndim; ++i) {
+      printf("%lld%s", (long long)dims[i], (i + 1 < ndim) ? ", " : "");
     }
+    printf(")\n");
+    fflush(stdout);
+  }
 
-    PyArrayObject *mesh_array_real = (PyArrayObject *)PyArray_FROM_OTF(
-        density_mesh_real, NP_OUT_TYPE, NPY_ARRAY_IN_ARRAY);
-    if (mesh_array_real == NULL) {
-        return NULL;
-    }
-
-    PyArrayObject *k1min_arr = (PyArrayObject *)PyArray_FROM_OTF(k1min_bin_obj, NPY_FLOAT32, NPY_ARRAY_IN_ARRAY);
-    PyArrayObject *k1max_arr = (PyArrayObject *)PyArray_FROM_OTF(k1max_bin_obj, NPY_FLOAT32, NPY_ARRAY_IN_ARRAY);
-    PyArrayObject *k2min_arr = (PyArrayObject *)PyArray_FROM_OTF(k2min_bin_obj, NPY_FLOAT32, NPY_ARRAY_IN_ARRAY);
-    PyArrayObject *k2max_arr = (PyArrayObject *)PyArray_FROM_OTF(k2max_bin_obj, NPY_FLOAT32, NPY_ARRAY_IN_ARRAY);
-    PyArrayObject *k3min_arr = (PyArrayObject *)PyArray_FROM_OTF(k3min_bin_obj, NPY_FLOAT32, NPY_ARRAY_IN_ARRAY);
-    PyArrayObject *k3max_arr = (PyArrayObject *)PyArray_FROM_OTF(k3max_bin_obj, NPY_FLOAT32, NPY_ARRAY_IN_ARRAY);
-    if (k1min_arr == NULL || k1max_arr == NULL || k2min_arr == NULL || k2max_arr == NULL || k3min_arr == NULL || k3max_arr == NULL) {
-        Py_XDECREF(k1min_arr);
-        Py_XDECREF(k1max_arr);
-        Py_XDECREF(k2min_arr);
-        Py_XDECREF(k2max_arr);
-        Py_XDECREF(k3min_arr);
-        Py_XDECREF(k3max_arr);
-        Py_DECREF(mesh_array_real);
-        return NULL;
-    }
-
-    if (PyArray_NDIM(k1min_arr) != 1 || PyArray_NDIM(k1max_arr) != 1 ||
-        PyArray_NDIM(k2min_arr) != 1 || PyArray_NDIM(k2max_arr) != 1 ||
-        PyArray_NDIM(k3min_arr) != 1 || PyArray_NDIM(k3max_arr) != 1) {
-        PyErr_SetString(PyExc_ValueError, "All k-bin inputs must be 1D float arrays");
-        Py_DECREF(k1min_arr);
-        Py_DECREF(k1max_arr);
-        Py_DECREF(k2min_arr);
-        Py_DECREF(k2max_arr);
-        Py_DECREF(k3min_arr);
-        Py_DECREF(k3max_arr);
-        Py_DECREF(mesh_array_real);
-        return NULL;
-    }
-
-    if (verbose) {
-        int ndim = PyArray_NDIM(mesh_array_real);
-        npy_intp *dims = PyArray_DIMS(mesh_array_real);
-        int i;
-        printf("density_mesh ndim=%d shape=(", ndim);
-        for (i = 0; i < ndim; ++i) {
-            printf("%lld%s", (long long)dims[i], (i + 1 < ndim) ? ", " : "");
-        }
-        printf(")\n");
-        fflush(stdout);
-    }
-
-    // Convert kmin_bin and kmax_bin from numpy arrays to float arrays
-    int n_of_kbins = (int)PyArray_SIZE(k1min_arr);
-    if ((int)PyArray_SIZE(k1max_arr) != n_of_kbins ||
-        (int)PyArray_SIZE(k2min_arr) != n_of_kbins ||
-        (int)PyArray_SIZE(k2max_arr) != n_of_kbins ||
-        (int)PyArray_SIZE(k3min_arr) != n_of_kbins ||
-        (int)PyArray_SIZE(k3max_arr) != n_of_kbins) {
-        PyErr_SetString(PyExc_ValueError, "All k-bin arrays must have the same length");
-        Py_DECREF(k1min_arr);
-        Py_DECREF(k1max_arr);
-        Py_DECREF(k2min_arr);
-        Py_DECREF(k2max_arr);
-        Py_DECREF(k3min_arr);
-        Py_DECREF(k3max_arr);
-        Py_DECREF(mesh_array_real);
-        return NULL;
-    }
-
-    float *k1min_bin = (float *)PyArray_DATA(k1min_arr);
-    float *k1max_bin = (float *)PyArray_DATA(k1max_arr);
-    float *k2min_bin = (float *)PyArray_DATA(k2min_arr);
-    float *k2max_bin = (float *)PyArray_DATA(k2max_arr);
-    float *k3min_bin = (float *)PyArray_DATA(k3min_arr);
-    float *k3max_bin = (float *)PyArray_DATA(k3max_arr);
-
-    // Compute the Fourier transform of the density mesh
-    fft_complex *density_mesh_fourier = (fft_complex *)malloc(sizeof(fft_complex) * PyArray_SIZE(mesh_array_real));
-    if (density_mesh_fourier == NULL) {
-        fprintf(stderr, "Error allocating memory for density_mesh_fourier\n");
-        Py_DECREF(mesh_array_real);
-        return NULL;
-    }
-    FFTW(plan) fwd_plan = power_get_forward_plan((int)PyArray_DIM(mesh_array_real, 0), nthreads);
-    if (fwd_plan == NULL) {
-      PyErr_SetString(PyExc_RuntimeError, "Error creating forward FFT plan");
-        free(density_mesh_fourier);
-        Py_DECREF(k1min_arr);
-        Py_DECREF(k1max_arr);
-        Py_DECREF(k2min_arr);
-        Py_DECREF(k2max_arr);
-        Py_DECREF(k3min_arr);
-        Py_DECREF(k3max_arr);
-        Py_DECREF(mesh_array_real);
-        return NULL;
-    }
-    FFTW(execute_dft_r2c)(fwd_plan, (fft_real *)PyArray_DATA(mesh_array_real), density_mesh_fourier);
-    FFTW(destroy_plan)(fwd_plan);
-
-    // Create the raw bispectrum output array
-    npy_intp out_dims[1] = { (npy_intp)n_of_kbins };
-    PyArrayObject *bispectrum_array = (PyArrayObject *)PyArray_EMPTY(1, out_dims, NPY_FLOAT, 0);
-    if (bispectrum_array == NULL) {
-        fprintf(stderr, "Error allocating memory for bispectrum_array\n");
-        free(density_mesh_fourier);
-        Py_DECREF(k1min_arr);
-        Py_DECREF(k1max_arr);
-        Py_DECREF(k2min_arr);
-        Py_DECREF(k2max_arr);
-        Py_DECREF(k3min_arr);
-        Py_DECREF(k3max_arr);
-        Py_DECREF(mesh_array_real);
-        return NULL;
-    }
-
-    // Compute the Ik array for each k-bin
-    int ngrid = (int)PyArray_DIM(mesh_array_real, 0);
-    for (int i = 0; i < n_of_kbins; i++) {
-        float k1min = k1min_bin[i];
-        float k1max = k1max_bin[i];
-        float k2min = k2min_bin[i];
-        float k2max = k2max_bin[i];
-        float k3min = k3min_bin[i];
-        float k3max = k3max_bin[i];
-        fft_real *Ik1 = compute_Ik(density_mesh_fourier, ngrid, Lbox, k1min, k1max, nthreads);
-        fft_real *Ik2 = compute_Ik(density_mesh_fourier, ngrid, Lbox, k2min, k2max, nthreads);
-        fft_real *Ik3 = compute_Ik(density_mesh_fourier, ngrid, Lbox, k3min, k3max, nthreads);
-        if (Ik1 == NULL || Ik2 == NULL || Ik3 == NULL) {
-          PyErr_Format(PyExc_RuntimeError, "Error computing Ik for bin %d", i);
-          if (Ik1) free(Ik1);
-          if (Ik2) free(Ik2);
-          if (Ik3) free(Ik3);
-            free(density_mesh_fourier);
-            Py_DECREF(k1min_arr);
-            Py_DECREF(k1max_arr);
-            Py_DECREF(k2min_arr);
-            Py_DECREF(k2max_arr);
-            Py_DECREF(k3min_arr);
-            Py_DECREF(k3max_arr);
-            Py_DECREF(mesh_array_real);
-            return NULL;
-        }
-
-        // Compute the raw bispectrum for this k-bin
-        double bispectrum_value = 0.0;
-        for (int j = 0; j < ngrid * ngrid * ngrid; j++) {
-            bispectrum_value += Ik1[j] * Ik2[j] * Ik3[j];
-        }
-        ((float *)PyArray_DATA(bispectrum_array))[i] = (float)bispectrum_value;
-
-        free(Ik1);
-        free(Ik2);
-        free(Ik3);
-    }
-
+  // Convert kmin_bin and kmax_bin from numpy arrays to float arrays
+  int n_of_kbins = (int)PyArray_SIZE(k1min_arr);
+  if ((int)PyArray_SIZE(k1max_arr) != n_of_kbins ||
+    (int)PyArray_SIZE(k2min_arr) != n_of_kbins ||
+    (int)PyArray_SIZE(k2max_arr) != n_of_kbins ||
+    (int)PyArray_SIZE(k3min_arr) != n_of_kbins ||
+    (int)PyArray_SIZE(k3max_arr) != n_of_kbins) {
+    PyErr_SetString(PyExc_ValueError, "All k-bin arrays must have the same length");
     Py_DECREF(k1min_arr);
     Py_DECREF(k1max_arr);
     Py_DECREF(k2min_arr);
@@ -515,84 +419,206 @@ static PyObject *core_compute_raw_bispectrum(PyObject * self, PyObject * args)
     Py_DECREF(k3min_arr);
     Py_DECREF(k3max_arr);
     Py_DECREF(mesh_array_real);
+    return NULL;
+  }
+
+  float *k1min_bin = (float *)PyArray_DATA(k1min_arr);
+  float *k1max_bin = (float *)PyArray_DATA(k1max_arr);
+  float *k2min_bin = (float *)PyArray_DATA(k2min_arr);
+  float *k2max_bin = (float *)PyArray_DATA(k2max_arr);
+  float *k3min_bin = (float *)PyArray_DATA(k3min_arr);
+  float *k3max_bin = (float *)PyArray_DATA(k3max_arr);
+
+  // Compute the Fourier transform of the density mesh
+  fft_complex *density_mesh_fourier = (fft_complex *)malloc(sizeof(fft_complex) * PyArray_SIZE(mesh_array_real));
+  if (density_mesh_fourier == NULL) {
+    fprintf(stderr, "Error allocating memory for density_mesh_fourier\n");
+    Py_DECREF(mesh_array_real);
+    return NULL;
+  }
+  FFTW(plan) fwd_plan = power_get_forward_plan((int)PyArray_DIM(mesh_array_real, 0), nthreads);
+  if (fwd_plan == NULL) {
+    PyErr_SetString(PyExc_RuntimeError, "Error creating forward FFT plan");
     free(density_mesh_fourier);
-    return (PyObject *)bispectrum_array;
+    Py_DECREF(k1min_arr);
+    Py_DECREF(k1max_arr);
+    Py_DECREF(k2min_arr);
+    Py_DECREF(k2max_arr);
+    Py_DECREF(k3min_arr);
+    Py_DECREF(k3max_arr);
+    Py_DECREF(mesh_array_real);
+    return NULL;
+  }
+  FFTW(execute_dft_r2c)(fwd_plan, (fft_real *)PyArray_DATA(mesh_array_real), density_mesh_fourier);
+  FFTW(destroy_plan)(fwd_plan);
+
+  // Create the raw bispectrum output array
+  npy_intp out_dims[1] = { (npy_intp)n_of_kbins };
+  PyArrayObject *bispectrum_array = (PyArrayObject *)PyArray_EMPTY(1, out_dims, NPY_FLOAT, 0);
+  if (bispectrum_array == NULL) {
+    fprintf(stderr, "Error allocating memory for bispectrum_array\n");
+    free(density_mesh_fourier);
+    Py_DECREF(k1min_arr);
+    Py_DECREF(k1max_arr);
+    Py_DECREF(k2min_arr);
+    Py_DECREF(k2max_arr);
+    Py_DECREF(k3min_arr);
+    Py_DECREF(k3max_arr);
+    Py_DECREF(mesh_array_real);
+    return NULL;
+  }
+
+  // Compute the Ik array for each k-bin
+  int ngrid = (int)PyArray_DIM(mesh_array_real, 0);
+  for (int i = 0; i < n_of_kbins; i++) {
+    float k1min = k1min_bin[i];
+    float k1max = k1max_bin[i];
+    float k2min = k2min_bin[i];
+    float k2max = k2max_bin[i];
+    float k3min = k3min_bin[i];
+    float k3max = k3max_bin[i];
+    fft_real *Ik1 = compute_Ik(density_mesh_fourier, ngrid, Lbox, k1min, k1max, nthreads);
+    fft_real *Ik2 = compute_Ik(density_mesh_fourier, ngrid, Lbox, k2min, k2max, nthreads);
+    fft_real *Ik3 = compute_Ik(density_mesh_fourier, ngrid, Lbox, k3min, k3max, nthreads);
+    if (Ik1 == NULL || Ik2 == NULL || Ik3 == NULL) {
+      PyErr_Format(PyExc_RuntimeError, "Error computing Ik for bin %d", i);
+      if (Ik1) free(Ik1);
+      if (Ik2) free(Ik2);
+      if (Ik3) free(Ik3);
+        free(density_mesh_fourier);
+        Py_DECREF(k1min_arr);
+        Py_DECREF(k1max_arr);
+        Py_DECREF(k2min_arr);
+        Py_DECREF(k2max_arr);
+        Py_DECREF(k3min_arr);
+        Py_DECREF(k3max_arr);
+        Py_DECREF(mesh_array_real);
+        return NULL;
+    }
+
+    // Compute the raw bispectrum for this k-bin
+    double bispectrum_value = 0.0;
+    for (int j = 0; j < ngrid * ngrid * ngrid; j++) {
+        bispectrum_value += Ik1[j] * Ik2[j] * Ik3[j];
+    }
+    ((float *)PyArray_DATA(bispectrum_array))[i] = (float)bispectrum_value;
+
+    free(Ik1);
+    free(Ik2);
+    free(Ik3);
+  }
+
+  Py_DECREF(k1min_arr);
+  Py_DECREF(k1max_arr);
+  Py_DECREF(k2min_arr);
+  Py_DECREF(k2max_arr);
+  Py_DECREF(k3min_arr);
+  Py_DECREF(k3max_arr);
+  Py_DECREF(mesh_array_real);
+  free(density_mesh_fourier);
+  return (PyObject *)bispectrum_array;
 }
 
 static PyObject *core_compute_normalization(PyObject * self, PyObject * args)
 {
-    int ngrid, nthreads, verbose;
-    float Lbox;
-    PyObject *k1min_bin_obj, *k1max_bin_obj, *k2min_bin_obj, *k2max_bin_obj, *k3min_bin_obj, *k3max_bin_obj;
+  int ngrid, nthreads, verbose;
+  float Lbox;
+  PyObject *k1min_bin_obj, *k1max_bin_obj, *k2min_bin_obj, *k2max_bin_obj, *k3min_bin_obj, *k3max_bin_obj;
 
-    if (!PyArg_ParseTuple(args, "ifOOOOOOii", &ngrid, &Lbox, &k1min_bin_obj, &k1max_bin_obj, &k2min_bin_obj, &k2max_bin_obj, &k3min_bin_obj, &k3max_bin_obj, &nthreads, &verbose)) {
-        return NULL;
-    }
+  if (!PyArg_ParseTuple(args, "ifOOOOOOii", &ngrid, &Lbox, &k1min_bin_obj, &k1max_bin_obj, &k2min_bin_obj, &k2max_bin_obj, &k3min_bin_obj, &k3max_bin_obj, &nthreads, &verbose)) {
+      return NULL;
+  }
 
-    (void)verbose;
+  (void)verbose;
 
-    PyArrayObject *k1min_arr = (PyArrayObject *)PyArray_FROM_OTF(k1min_bin_obj, NPY_FLOAT32, NPY_ARRAY_IN_ARRAY);
-    PyArrayObject *k1max_arr = (PyArrayObject *)PyArray_FROM_OTF(k1max_bin_obj, NPY_FLOAT32, NPY_ARRAY_IN_ARRAY);
-    PyArrayObject *k2min_arr = (PyArrayObject *)PyArray_FROM_OTF(k2min_bin_obj, NPY_FLOAT32, NPY_ARRAY_IN_ARRAY);
-    PyArrayObject *k2max_arr = (PyArrayObject *)PyArray_FROM_OTF(k2max_bin_obj, NPY_FLOAT32, NPY_ARRAY_IN_ARRAY);
-    PyArrayObject *k3min_arr = (PyArrayObject *)PyArray_FROM_OTF(k3min_bin_obj, NPY_FLOAT32, NPY_ARRAY_IN_ARRAY);
-    PyArrayObject *k3max_arr = (PyArrayObject *)PyArray_FROM_OTF(k3max_bin_obj, NPY_FLOAT32, NPY_ARRAY_IN_ARRAY);
-    if (k1min_arr == NULL || k1max_arr == NULL || k2min_arr == NULL || k2max_arr == NULL || k3min_arr == NULL || k3max_arr == NULL) {
-        Py_XDECREF(k1min_arr);
-        Py_XDECREF(k1max_arr);
-        Py_XDECREF(k2min_arr);
-        Py_XDECREF(k2max_arr);
-        Py_XDECREF(k3min_arr);
-        Py_XDECREF(k3max_arr);
-        return NULL;
-    }
+  PyArrayObject *k1min_arr = (PyArrayObject *)PyArray_FROM_OTF(k1min_bin_obj, NPY_FLOAT32, NPY_ARRAY_IN_ARRAY);
+  PyArrayObject *k1max_arr = (PyArrayObject *)PyArray_FROM_OTF(k1max_bin_obj, NPY_FLOAT32, NPY_ARRAY_IN_ARRAY);
+  PyArrayObject *k2min_arr = (PyArrayObject *)PyArray_FROM_OTF(k2min_bin_obj, NPY_FLOAT32, NPY_ARRAY_IN_ARRAY);
+  PyArrayObject *k2max_arr = (PyArrayObject *)PyArray_FROM_OTF(k2max_bin_obj, NPY_FLOAT32, NPY_ARRAY_IN_ARRAY);
+  PyArrayObject *k3min_arr = (PyArrayObject *)PyArray_FROM_OTF(k3min_bin_obj, NPY_FLOAT32, NPY_ARRAY_IN_ARRAY);
+  PyArrayObject *k3max_arr = (PyArrayObject *)PyArray_FROM_OTF(k3max_bin_obj, NPY_FLOAT32, NPY_ARRAY_IN_ARRAY);
+  if (k1min_arr == NULL || k1max_arr == NULL || k2min_arr == NULL || k2max_arr == NULL || k3min_arr == NULL || k3max_arr == NULL) {
+    Py_XDECREF(k1min_arr);
+    Py_XDECREF(k1max_arr);
+    Py_XDECREF(k2min_arr);
+    Py_XDECREF(k2max_arr);
+    Py_XDECREF(k3min_arr);
+    Py_XDECREF(k3max_arr);
+    return NULL;
+  }
 
-    // Instead of the density mesh in Fourier space, create a dummy array of the same size filled with 1s,
-    // which will give us the normalization factor when passed through compute_Ik
-    fft_complex *dummy_density_mesh_fourier = (fft_complex *)malloc(sizeof(fft_complex) * ngrid * ngrid * (ngrid / 2 + 1));
-    if (dummy_density_mesh_fourier == NULL) {
-        fprintf(stderr, "Error allocating memory for dummy_density_mesh_fourier\n");
-        Py_DECREF(k1min_arr);
-        Py_DECREF(k1max_arr);
-        Py_DECREF(k2min_arr);
-        Py_DECREF(k2max_arr);
-        Py_DECREF(k3min_arr);
-        Py_DECREF(k3max_arr);
-        return NULL;
-    }
-    for (int i = 0; i < ngrid * ngrid * (ngrid / 2 + 1); i++) {
-        dummy_density_mesh_fourier[i] = 1.0f + 0.0f * I;
-    }
+  // Instead of the density mesh in Fourier space, create a dummy array of the same size filled with 1s,
+  // which will give us the normalization factor when passed through compute_Ik
+  fft_complex *dummy_density_mesh_fourier = (fft_complex *)malloc(sizeof(fft_complex) * ngrid * ngrid * (ngrid / 2 + 1));
+  if (dummy_density_mesh_fourier == NULL) {
+    fprintf(stderr, "Error allocating memory for dummy_density_mesh_fourier\n");
+    Py_DECREF(k1min_arr);
+    Py_DECREF(k1max_arr);
+    Py_DECREF(k2min_arr);
+    Py_DECREF(k2max_arr);
+    Py_DECREF(k3min_arr);
+    Py_DECREF(k3max_arr);
+    return NULL;
+  }
+  for (int i = 0; i < ngrid * ngrid * (ngrid / 2 + 1); i++) {
+    dummy_density_mesh_fourier[i] = 1.0f + 0.0f * I;
+  }
 
-    // Convert kmin_bin and kmax_bin from numpy arrays to float arrays
-    int n_of_kbins = (int)PyArray_SIZE(k1min_arr);
-    if ((int)PyArray_SIZE(k1max_arr) != n_of_kbins ||
-        (int)PyArray_SIZE(k2min_arr) != n_of_kbins ||
-        (int)PyArray_SIZE(k2max_arr) != n_of_kbins ||
-        (int)PyArray_SIZE(k3min_arr) != n_of_kbins ||
-        (int)PyArray_SIZE(k3max_arr) != n_of_kbins) {
-        PyErr_SetString(PyExc_ValueError, "All k-bin arrays must have the same length");
-        Py_DECREF(k1min_arr);
-        Py_DECREF(k1max_arr);
-        Py_DECREF(k2min_arr);
-        Py_DECREF(k2max_arr);
-        Py_DECREF(k3min_arr);
-        Py_DECREF(k3max_arr);
-        return NULL;
-    }
+  // Convert kmin_bin and kmax_bin from numpy arrays to float arrays
+  int n_of_kbins = (int)PyArray_SIZE(k1min_arr);
+  if ((int)PyArray_SIZE(k1max_arr) != n_of_kbins ||
+    (int)PyArray_SIZE(k2min_arr) != n_of_kbins ||
+    (int)PyArray_SIZE(k2max_arr) != n_of_kbins ||
+    (int)PyArray_SIZE(k3min_arr) != n_of_kbins ||
+    (int)PyArray_SIZE(k3max_arr) != n_of_kbins) {
+    PyErr_SetString(PyExc_ValueError, "All k-bin arrays must have the same length");
+    Py_DECREF(k1min_arr);
+    Py_DECREF(k1max_arr);
+    Py_DECREF(k2min_arr);
+    Py_DECREF(k2max_arr);
+    Py_DECREF(k3min_arr);
+    Py_DECREF(k3max_arr);
+    return NULL;
+  }
 
-    float *k1min_bin = (float *)PyArray_DATA(k1min_arr);
-    float *k1max_bin = (float *)PyArray_DATA(k1max_arr);
-    float *k2min_bin = (float *)PyArray_DATA(k2min_arr);
-    float *k2max_bin = (float *)PyArray_DATA(k2max_arr);
-    float *k3min_bin = (float *)PyArray_DATA(k3min_arr);
-    float *k3max_bin = (float *)PyArray_DATA(k3max_arr);
+  float *k1min_bin = (float *)PyArray_DATA(k1min_arr);
+  float *k1max_bin = (float *)PyArray_DATA(k1max_arr);
+  float *k2min_bin = (float *)PyArray_DATA(k2min_arr);
+  float *k2max_bin = (float *)PyArray_DATA(k2max_arr);
+  float *k3min_bin = (float *)PyArray_DATA(k3min_arr);
+  float *k3max_bin = (float *)PyArray_DATA(k3max_arr);
 
-    // Create the normalization output array
-    npy_intp out_dims[1] = { (npy_intp)PyArray_SIZE(k1min_arr) };
-    PyArrayObject *normalization_array = (PyArrayObject *)PyArray_EMPTY(1, out_dims, NPY_FLOAT, 0);
-    if (normalization_array == NULL) {
-        fprintf(stderr, "Error allocating memory for normalization_array\n");
+  // Create the normalization output array
+  npy_intp out_dims[1] = { (npy_intp)PyArray_SIZE(k1min_arr) };
+  PyArrayObject *normalization_array = (PyArrayObject *)PyArray_EMPTY(1, out_dims, NPY_FLOAT, 0);
+  if (normalization_array == NULL) {
+    fprintf(stderr, "Error allocating memory for normalization_array\n");
+    free(dummy_density_mesh_fourier);
+    Py_DECREF(k1min_arr);
+    Py_DECREF(k1max_arr);
+    Py_DECREF(k2min_arr);
+    Py_DECREF(k2max_arr);
+    Py_DECREF(k3min_arr);
+    Py_DECREF(k3max_arr);
+    return NULL;
+  }
+
+  // Compute the normalization factor for each k-bin
+  for (int i = 0; i < n_of_kbins; i++) {
+    float k1min = k1min_bin[i];
+    float k1max = k1max_bin[i];
+    float k2min = k2min_bin[i];
+    float k2max = k2max_bin[i];
+    float k3min = k3min_bin[i];
+    float k3max = k3max_bin[i];
+    fft_real *Ik1 = compute_Ik(dummy_density_mesh_fourier, ngrid, Lbox, k1min, k1max, nthreads);
+    fft_real *Ik2 = compute_Ik(dummy_density_mesh_fourier, ngrid, Lbox, k2min, k2max, nthreads);
+    fft_real *Ik3 = compute_Ik(dummy_density_mesh_fourier, ngrid, Lbox, k3min, k3max, nthreads);
+    if (Ik1 == NULL || Ik2 == NULL || Ik3 == NULL) {
+      PyErr_Format(PyExc_RuntimeError, "Error computing Ik for bin %d", i);
+      if (Ik1) free(Ik1);
+      if (Ik2) free(Ik2);
+      if (Ik3) free(Ik3);
         free(dummy_density_mesh_fourier);
         Py_DECREF(k1min_arr);
         Py_DECREF(k1max_arr);
@@ -603,51 +629,25 @@ static PyObject *core_compute_normalization(PyObject * self, PyObject * args)
         return NULL;
     }
 
-    // Compute the normalization factor for each k-bin
-    for (int i = 0; i < n_of_kbins; i++) {
-        float k1min = k1min_bin[i];
-        float k1max = k1max_bin[i];
-        float k2min = k2min_bin[i];
-        float k2max = k2max_bin[i];
-        float k3min = k3min_bin[i];
-        float k3max = k3max_bin[i];
-        fft_real *Ik1 = compute_Ik(dummy_density_mesh_fourier, ngrid, Lbox, k1min, k1max, nthreads);
-        fft_real *Ik2 = compute_Ik(dummy_density_mesh_fourier, ngrid, Lbox, k2min, k2max, nthreads);
-        fft_real *Ik3 = compute_Ik(dummy_density_mesh_fourier, ngrid, Lbox, k3min, k3max, nthreads);
-        if (Ik1 == NULL || Ik2 == NULL || Ik3 == NULL) {
-          PyErr_Format(PyExc_RuntimeError, "Error computing Ik for bin %d", i);
-          if (Ik1) free(Ik1);
-          if (Ik2) free(Ik2);
-          if (Ik3) free(Ik3);
-            free(dummy_density_mesh_fourier);
-            Py_DECREF(k1min_arr);
-            Py_DECREF(k1max_arr);
-            Py_DECREF(k2min_arr);
-            Py_DECREF(k2max_arr);
-            Py_DECREF(k3min_arr);
-            Py_DECREF(k3max_arr);
-            return NULL;
-        }
-
-        double normalization_value = 0.0;
-        for (int j = 0; j < ngrid * ngrid * ngrid; j++) {
-            normalization_value += Ik1[j] * Ik2[j] * Ik3[j];
-        }
-        ((float *)PyArray_DATA(normalization_array))[i] = (float)normalization_value;
-
-        free(Ik1);
-        free(Ik2);
-        free(Ik3);
+    double normalization_value = 0.0;
+    for (int j = 0; j < ngrid * ngrid * ngrid; j++) {
+        normalization_value += Ik1[j] * Ik2[j] * Ik3[j];
     }
+    ((float *)PyArray_DATA(normalization_array))[i] = (float)normalization_value;
 
-    free(dummy_density_mesh_fourier);
-    Py_DECREF(k1min_arr);
-    Py_DECREF(k1max_arr);
-    Py_DECREF(k2min_arr);
-    Py_DECREF(k2max_arr);
-    Py_DECREF(k3min_arr);
-    Py_DECREF(k3max_arr);
-    return (PyObject *)normalization_array;
+    free(Ik1);
+    free(Ik2);
+    free(Ik3);
+  }
+
+  free(dummy_density_mesh_fourier);
+  Py_DECREF(k1min_arr);
+  Py_DECREF(k1max_arr);
+  Py_DECREF(k2min_arr);
+  Py_DECREF(k2max_arr);
+  Py_DECREF(k3min_arr);
+  Py_DECREF(k3max_arr);
+  return (PyObject *)normalization_array;
 }
 
 static PyObject *core_compute_effective_triangles(PyObject * self, PyObject * args)
