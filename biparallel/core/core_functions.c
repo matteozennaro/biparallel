@@ -297,18 +297,20 @@ fft_complex *apply_mask(fft_complex *density_mesh_fourier, int ngrid, float Lbox
     memcpy(masked_density_mesh_fourier, density_mesh_fourier, sizeof(fft_complex) * ngrid * ngrid * (ngrid / 2 + 1));
 
     float dk = 2.0f * M_PI / Lbox;
+    float kmin2 = kmin_bin * kmin_bin;
+    float kmax2 = kmax_bin * kmax_bin;
     int nz = ngrid / 2 + 1;
   #ifdef _OPENMP
   #pragma omp parallel for collapse(2) schedule(static) num_threads(nthreads > 0 ? nthreads : 1)
   #endif
     for (int i = 0; i < ngrid; i++) {
       for (int j = 0; j < ngrid; j++) {
-        float kx = modulus(i, ngrid) * dk;
+          float kx = modulus(i, ngrid) * dk;
         float ky = modulus(j, ngrid) * dk;
         for (int k = 0; k < nz; k++) {
           float kz = k * dk;
-          float k_mag = sqrtf(kx * kx + ky * ky + kz * kz);
-          if (k_mag < kmin_bin || k_mag >= kmax_bin) {
+          float k_mag2 = kx * kx + ky * ky + kz * kz;
+          if (k_mag2 < kmin2 || k_mag2 >= kmax2) {
             unsigned long long idx = (unsigned long long)nz * ((unsigned long long)ngrid * (unsigned long long)j + (unsigned long long)i) + (unsigned long long)k;
             masked_density_mesh_fourier[idx] = 0.0f + 0.0f * I;
           }
@@ -801,7 +803,7 @@ static PyObject *core_compute_effective_triangles(PyObject * self, PyObject * ar
   int error_bin = -1;
 
 #ifdef _OPENMP
-#pragma omp parallel for schedule(dynamic) num_threads(nthreads > 0 ? nthreads : 1)
+#pragma omp parallel for schedule(dynamic, 1) num_threads(nthreads > 0 ? nthreads : 1)
 #endif
   for (int i = 0; i < n_of_kbins; i++) {
     float k1min = k1min_bin[i];
@@ -852,6 +854,9 @@ static PyObject *core_compute_effective_triangles(PyObject * self, PyObject * ar
     }
 
     double k1eff_value = 0.0, k2eff_value = 0.0, k3eff_value = 0.0;
+#ifdef _OPENMP
+#pragma omp simd reduction(+:k1eff_value,k2eff_value,k3eff_value)
+#endif
     for (int j = 0; j < total_cells; j++) {
       k1eff_value += Iq1[j] * Ik2[j] * Ik3[j];
       k2eff_value += Ik1[j] * Iq2[j] * Ik3[j];
