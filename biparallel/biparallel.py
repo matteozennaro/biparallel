@@ -39,8 +39,8 @@ class BiParallel:
         k3_min_bin = np.array(k3_min_bin, dtype=np.float32)
         k3_max_bin = np.array(k3_max_bin, dtype=np.float32)
         # Call the core function to compute the raw bispectrum
-        bispectrum = compute_raw_bispectrum(self.density_mesh, self.Lbox, k1_min_bin, k1_max_bin, k2_min_bin, k2_max_bin, k3_min_bin, k3_max_bin, self.nthreads, int(self.verbose))
-        return bispectrum
+        self.raw_bispectrum = compute_raw_bispectrum(self.density_mesh, self.Lbox, k1_min_bin, k1_max_bin, k2_min_bin, k2_max_bin, k3_min_bin, k3_max_bin, self.nthreads, int(self.verbose))
+        return self.raw_bispectrum
 
     def compute_normalization(self, kbin_edges):
         # Similar to compute_raw_bispectrum but calls a different core function for normalization
@@ -69,8 +69,8 @@ class BiParallel:
         k3_max_bin = np.array(k3_max_bin, dtype=np.float32)
         # Call the core function to compute the normalization
         ngrid = self.density_mesh.shape[0]
-        normalization = compute_normalization(ngrid, self.Lbox, k1_min_bin, k1_max_bin, k2_min_bin, k2_max_bin, k3_min_bin, k3_max_bin, self.nthreads, int(self.verbose))
-        return normalization
+        self.normalization = compute_normalization(ngrid, self.Lbox, k1_min_bin, k1_max_bin, k2_min_bin, k2_max_bin, k3_min_bin, k3_max_bin, self.nthreads, int(self.verbose))
+        return self.normalization
 
     def compute_effective_triangles(self, kbin_edges):
         k1_min_bin = []
@@ -92,10 +92,12 @@ class BiParallel:
                         k3_max_bin.append(kbin_edges[k + 1])
         ngrid = self.density_mesh.shape[0]
         effective_triangles = compute_effective_triangles(ngrid, self.Lbox, k1_min_bin, k1_max_bin, k2_min_bin, k2_max_bin, k3_min_bin, k3_max_bin, self.nthreads, int(self.verbose))
-        return effective_triangles
+        normalization = self.compute_normalization(kbin_edges) if not hasattr(self, 'normalization') else self.normalization
+        self.effective_triangles = effective_triangles / normalization
+        return self.effective_triangles
 
     def compute_bispectrum(self, kbin_edges):
-        raw_bispectrum = self.compute_raw_bispectrum(kbin_edges)
-        normalization = self.compute_normalization(kbin_edges)
+        raw_bispectrum = self.compute_raw_bispectrum(kbin_edges) if not hasattr(self, 'raw_bispectrum') else self.raw_bispectrum
+        normalization = self.compute_normalization(kbin_edges) if not hasattr(self, 'normalization') else self.normalization
         bispectrum = raw_bispectrum / normalization * self.Lbox**6 / self.density_mesh.size**3
         return bispectrum
