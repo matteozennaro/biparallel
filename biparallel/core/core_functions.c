@@ -793,6 +793,16 @@ static PyObject *core_compute_effective_triangles(PyObject * self, PyObject * ar
   }
 
   // Compute the normalization factor for each k-bin
+  float *k1_eff_data = (float *)PyArray_DATA(k1_eff);
+  float *k2_eff_data = (float *)PyArray_DATA(k2_eff);
+  float *k3_eff_data = (float *)PyArray_DATA(k3_eff);
+  int total_cells = ngrid * ngrid * ngrid;
+  int bin_error = 0;
+  int error_bin = -1;
+
+#ifdef _OPENMP
+#pragma omp parallel for schedule(dynamic) num_threads(nthreads > 0 ? nthreads : 1)
+#endif
   for (int i = 0; i < n_of_kbins; i++) {
     float k1min = k1min_bin[i];
     float k1max = k1max_bin[i];
@@ -800,43 +810,56 @@ static PyObject *core_compute_effective_triangles(PyObject * self, PyObject * ar
     float k2max = k2max_bin[i];
     float k3min = k3min_bin[i];
     float k3max = k3max_bin[i];
-    fft_real *Ik1 = compute_Ik(dummy_density_mesh_fourier, ngrid, Lbox, k1min, k1max, nthreads);
-    fft_real *Ik2 = compute_Ik(dummy_density_mesh_fourier, ngrid, Lbox, k2min, k2max, nthreads);
-    fft_real *Ik3 = compute_Ik(dummy_density_mesh_fourier, ngrid, Lbox, k3min, k3max, nthreads);
-    fft_real *Iq1 = compute_Ik(k_mesh_fourier, ngrid, Lbox, k1min, k1max, nthreads);
-    fft_real *Iq2 = compute_Ik(k_mesh_fourier, ngrid, Lbox, k2min, k2max, nthreads);
-    fft_real *Iq3 = compute_Ik(k_mesh_fourier, ngrid, Lbox, k3min, k3max, nthreads);
+
+    /* Avoid nested oversubscription: outer loop is parallel, keep inner FFT/mask work single-threaded per bin. */
+    int ik_threads = 1;
+    fft_real *Ik1 = NULL;
+    fft_real *Ik2 = NULL;
+    fft_real *Ik3 = NULL;
+    fft_real *Iq1 = NULL;
+    fft_real *Iq2 = NULL;
+    fft_real *Iq3 = NULL;
+
+#ifdef _OPENMP
+#pragma omp critical(fftw_compute_ik)
+#endif
+    {
+      Ik1 = compute_Ik(dummy_density_mesh_fourier, ngrid, Lbox, k1min, k1max, ik_threads);
+      Ik2 = compute_Ik(dummy_density_mesh_fourier, ngrid, Lbox, k2min, k2max, ik_threads);
+      Ik3 = compute_Ik(dummy_density_mesh_fourier, ngrid, Lbox, k3min, k3max, ik_threads);
+      Iq1 = compute_Ik(k_mesh_fourier, ngrid, Lbox, k1min, k1max, ik_threads);
+      Iq2 = compute_Ik(k_mesh_fourier, ngrid, Lbox, k2min, k2max, ik_threads);
+      Iq3 = compute_Ik(k_mesh_fourier, ngrid, Lbox, k3min, k3max, ik_threads);
+    }
+
     if (Ik1 == NULL || Ik2 == NULL || Ik3 == NULL || Iq1 == NULL || Iq2 == NULL || Iq3 == NULL) {
-      PyErr_Format(PyExc_RuntimeError, "Error computing Ik for bin %d", i);
+#ifdef _OPENMP
+#pragma omp critical
+#endif
+      {
+        if (!bin_error) {
+          bin_error = 1;
+          error_bin = i;
+        }
+      }
       if (Ik1) free(Ik1);
       if (Ik2) free(Ik2);
       if (Ik3) free(Ik3);
       if (Iq1) free(Iq1);
       if (Iq2) free(Iq2);
       if (Iq3) free(Iq3);
-      free(dummy_density_mesh_fourier);
-      free(k_mesh_fourier);
-      Py_DECREF(k1min_arr);
-      Py_DECREF(k1max_arr);
-      Py_DECREF(k2min_arr);
-      Py_DECREF(k2max_arr);
-      Py_DECREF(k3min_arr);
-      Py_DECREF(k3max_arr);
-      return NULL;
+      continue;
     }
 
     double k1eff_value = 0.0, k2eff_value = 0.0, k3eff_value = 0.0;
-  #ifdef _OPENMP
-  #pragma omp parallel for reduction(+:k1eff_value,k2eff_value,k3eff_value) schedule(static) num_threads(nthreads > 0 ? nthreads : 1)
-  #endif
-    for (int j = 0; j < ngrid * ngrid * ngrid; j++) {
+    for (int j = 0; j < total_cells; j++) {
       k1eff_value += Iq1[j] * Ik2[j] * Ik3[j];
       k2eff_value += Ik1[j] * Iq2[j] * Ik3[j];
       k3eff_value += Ik1[j] * Ik2[j] * Iq3[j];
     }
-    ((float *)PyArray_DATA(k1_eff))[i] = (float)k1eff_value;
-    ((float *)PyArray_DATA(k2_eff))[i] = (float)k2eff_value;
-    ((float *)PyArray_DATA(k3_eff))[i] = (float)k3eff_value;
+    k1_eff_data[i] = (float)k1eff_value;
+    k2_eff_data[i] = (float)k2eff_value;
+    k3_eff_data[i] = (float)k3eff_value;
 
     free(Ik1);
     free(Ik2);
@@ -844,6 +867,19 @@ static PyObject *core_compute_effective_triangles(PyObject * self, PyObject * ar
     free(Iq1);
     free(Iq2);
     free(Iq3);
+  }
+
+  if (bin_error) {
+    PyErr_Format(PyExc_RuntimeError, "Error computing Ik for bin %d", error_bin);
+    free(dummy_density_mesh_fourier);
+    free(k_mesh_fourier);
+    Py_DECREF(k1min_arr);
+    Py_DECREF(k1max_arr);
+    Py_DECREF(k2min_arr);
+    Py_DECREF(k2max_arr);
+    Py_DECREF(k3min_arr);
+    Py_DECREF(k3max_arr);
+    return NULL;
   }
 
   free(dummy_density_mesh_fourier);
