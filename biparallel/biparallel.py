@@ -1,11 +1,12 @@
+import os
 import numpy as np
 from .core.core_functions import printmesh, compute_raw_bispectrum, compute_normalization, compute_effective_triangles
 
 class BiParallel:
-    def __init__(self, density_mesh, Lbox, nthreads=1, verbose=True):
+    def __init__(self, density_mesh, Lbox, nthreads=None, verbose=True):
         self.density_mesh = density_mesh
         self.Lbox = Lbox
-        self.nthreads = nthreads
+        self.nthreads = nthreads if nthreads is not None else os.cpu_count()
         self.verbose = verbose
 
     def print_mesh(self):
