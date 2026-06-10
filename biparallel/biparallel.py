@@ -1,13 +1,28 @@
 import os
 import numpy as np
-from .core.core_functions import printmesh, compute_raw_bispectrum, compute_normalization, compute_effective_triangles
+from .core.core_functions import printmesh, compute_raw_bispectrum, compute_normalization, compute_effective_triangles, set_wisdom_path
 
 class BiParallel:
-    def __init__(self, density_mesh, Lbox, nthreads=None, verbose=True):
+    def __init__(self, density_mesh, Lbox, nthreads=None, verbose=True, wisdom_path=None):
         self.density_mesh = density_mesh
         self.Lbox = Lbox
         self.nthreads = nthreads if nthreads is not None else os.cpu_count()
         self.verbose = verbose
+        self.wisdom_path = self._resolve_wisdom_path(wisdom_path)
+        self.wisdom_exists = os.path.exists(self.wisdom_path)
+        set_wisdom_path(self.wisdom_path)
+
+        if self.verbose:
+            state = "found" if self.wisdom_exists else "not found"
+            print(f"FFTW wisdom {state}: {self.wisdom_path}")
+
+    def _resolve_wisdom_path(self, wisdom_path):
+        if wisdom_path is not None:
+            return os.path.abspath(os.path.expanduser(wisdom_path))
+
+        cache_dir = os.path.join(os.path.expanduser("~"), ".cache", "biparallel")
+        os.makedirs(cache_dir, exist_ok=True)
+        return os.path.join(cache_dir, "fftw_wisdom.dat")
 
     def print_mesh(self):
         nthreads = self.nthreads  # You can set this to the desired number of threads
