@@ -468,23 +468,194 @@ static float *build_k_mag2_grid(int ngrid, float Lbox)
   return k_mag2_grid;
 }
 
+typedef struct {
+  size_t start;
+  size_t length;
+} shell_run_t;
+
+typedef struct {
+  float kmin;
+  float kmax;
+  size_t num_runs;
+  shell_run_t *runs;
+  unsigned long long stamp;
+  int valid;
+} shell_index_cache_entry_t;
+
+static int get_mask_cache_size(void)
+{
+  const char *cache_env = getenv("BIPARALLEL_MASK_CACHE_SIZE");
+  int cache_size = 8;
+
+  if (cache_env != NULL && cache_env[0] != '\0') {
+    int parsed = atoi(cache_env);
+    if (parsed > 0) {
+      cache_size = parsed;
+    }
+  }
+
+  if (cache_size < 4) {
+    cache_size = 4;
+  }
+
+  return cache_size;
+}
+
+static void destroy_shell_index_cache(shell_index_cache_entry_t *cache_entries, int cache_size)
+{
+  if (cache_entries == NULL) {
+    return;
+  }
+
+  for (int i = 0; i < cache_size; i++) {
+    if (cache_entries[i].runs != NULL) {
+      free(cache_entries[i].runs);
+    }
+  }
+
+  free(cache_entries);
+}
+
+static int shell_index_cache_fill_entry(shell_index_cache_entry_t *entry, const float *k_mag2_grid,
+                                        size_t nfour, float kmin_bin, float kmax_bin)
+{
+  float kmin2 = kmin_bin * kmin_bin;
+  float kmax2 = kmax_bin * kmax_bin;
+  size_t num_runs_est = 0;
+  size_t run_count = 0;
+  int in_run = 0;
+
+  for (size_t idx = 0; idx < nfour; idx++) {
+    float kval2 = k_mag2_grid[idx];
+    int in_shell = (kval2 >= kmin2 && kval2 < kmax2);
+
+    if (in_shell && !in_run) {
+      num_runs_est++;
+      in_run = 1;
+    } else if (!in_shell && in_run) {
+      in_run = 0;
+    }
+  }
+
+  if (entry->runs != NULL) {
+    free(entry->runs);
+    entry->runs = NULL;
+  }
+
+  entry->num_runs = 0;
+  if (num_runs_est == 0) {
+    entry->kmin = kmin_bin;
+    entry->kmax = kmax_bin;
+    entry->valid = 1;
+    return 0;
+  }
+
+  entry->runs = (shell_run_t *)malloc(sizeof(shell_run_t) * num_runs_est);
+  if (entry->runs == NULL) {
+    entry->num_runs = 0;
+    entry->valid = 0;
+    return -1;
+  }
+
+  in_run = 0;
+  size_t run_start = 0;
+  for (size_t idx = 0; idx < nfour; idx++) {
+    float kval2 = k_mag2_grid[idx];
+    int in_shell = (kval2 >= kmin2 && kval2 < kmax2);
+
+    if (in_shell && !in_run) {
+      run_start = idx;
+      in_run = 1;
+    } else if (!in_shell && in_run) {
+      entry->runs[run_count].start = run_start;
+      entry->runs[run_count].length = idx - run_start;
+      run_count++;
+      in_run = 0;
+    }
+  }
+
+  if (in_run) {
+    entry->runs[run_count].start = run_start;
+    entry->runs[run_count].length = nfour - run_start;
+    run_count++;
+  }
+
+  entry->kmin = kmin_bin;
+  entry->kmax = kmax_bin;
+  entry->num_runs = run_count;
+  entry->valid = 1;
+  return 0;
+}
+
+static shell_index_cache_entry_t *get_or_build_shell_index_entry(shell_index_cache_entry_t *cache_entries,
+                                                                 int cache_size,
+                                                                 unsigned long long *cache_stamp,
+                                                                 const float *k_mag2_grid,
+                                                                 size_t nfour,
+                                                                 float kmin_bin,
+                                                                 float kmax_bin)
+{
+  int victim = -1;
+  unsigned long long oldest_stamp = 0;
+
+  if (cache_entries == NULL || cache_stamp == NULL || k_mag2_grid == NULL) {
+    return NULL;
+  }
+
+  for (int i = 0; i < cache_size; i++) {
+    if (cache_entries[i].valid &&
+        cache_entries[i].kmin == kmin_bin &&
+        cache_entries[i].kmax == kmax_bin) {
+      cache_entries[i].stamp = ++(*cache_stamp);
+      return &cache_entries[i];
+    }
+
+    if (!cache_entries[i].valid) {
+      victim = i;
+      break;
+    }
+
+    if (victim < 0 || cache_entries[i].stamp < oldest_stamp) {
+      victim = i;
+      oldest_stamp = cache_entries[i].stamp;
+    }
+  }
+
+  if (victim < 0) {
+    return NULL;
+  }
+
+  if (shell_index_cache_fill_entry(&cache_entries[victim], k_mag2_grid, nfour, kmin_bin, kmax_bin) != 0) {
+    return NULL;
+  }
+
+  cache_entries[victim].stamp = ++(*cache_stamp);
+  return &cache_entries[victim];
+}
+
 static int apply_mask_into_buffer_precomputed(const fft_complex *density_mesh_fourier, fft_complex *masked_density_mesh_fourier,
-                                              const float *k_mag2_grid, int ngrid, float kmin_bin, float kmax_bin)
+                                              const float *k_mag2_grid, int ngrid, float kmin_bin, float kmax_bin,
+                                              shell_index_cache_entry_t *shell_cache_entries, int shell_cache_size,
+                                              unsigned long long *shell_cache_stamp)
 {
   size_t nfour = (size_t)ngrid * (size_t)ngrid * (size_t)(ngrid / 2 + 1);
   if (density_mesh_fourier == NULL || masked_density_mesh_fourier == NULL || k_mag2_grid == NULL) {
     return -1;
   }
 
-  memcpy(masked_density_mesh_fourier, density_mesh_fourier, sizeof(fft_complex) * nfour);
+  shell_index_cache_entry_t *shell_entry = get_or_build_shell_index_entry(shell_cache_entries, shell_cache_size,
+                                                                           shell_cache_stamp, k_mag2_grid, nfour,
+                                                                           kmin_bin, kmax_bin);
+  if (shell_entry == NULL) {
+    return -1;
+  }
 
-  float kmin2 = kmin_bin * kmin_bin;
-  float kmax2 = kmax_bin * kmax_bin;
-  for (size_t idx = 0; idx < nfour; idx++) {
-    float kval2 = k_mag2_grid[idx];
-    if (kval2 < kmin2 || kval2 >= kmax2) {
-      masked_density_mesh_fourier[idx] = 0.0f + 0.0f * I;
-    }
+  memset(masked_density_mesh_fourier, 0, sizeof(fft_complex) * nfour);
+  for (size_t i = 0; i < shell_entry->num_runs; i++) {
+    size_t start = shell_entry->runs[i].start;
+    size_t length = shell_entry->runs[i].length;
+    memcpy(&masked_density_mesh_fourier[start], &density_mesh_fourier[start],
+           sizeof(fft_complex) * length);
   }
 
   return 0;
@@ -493,9 +664,14 @@ static int apply_mask_into_buffer_precomputed(const fft_complex *density_mesh_fo
 static int compute_Ik_with_workspace_precomputed(const fft_complex *density_mesh_fourier, fft_complex *masked_workspace,
                                                  fft_real *real_workspace, FFTW(plan) inv_plan,
                                                  const float *k_mag2_grid, int ngrid,
-                                                 float kmin_bin, float kmax_bin)
+                                                 float kmin_bin, float kmax_bin,
+                                                 shell_index_cache_entry_t *shell_cache_entries, int shell_cache_size,
+                                                 unsigned long long *shell_cache_stamp)
 {
-  if (apply_mask_into_buffer_precomputed(density_mesh_fourier, masked_workspace, k_mag2_grid, ngrid, kmin_bin, kmax_bin) != 0) {
+  if (apply_mask_into_buffer_precomputed(density_mesh_fourier, masked_workspace, k_mag2_grid, ngrid,
+                                         kmin_bin, kmax_bin,
+                                         shell_cache_entries, shell_cache_size,
+                                         shell_cache_stamp) != 0) {
     return -1;
   }
   FFTW(execute_dft_c2r)(inv_plan, masked_workspace, real_workspace);
@@ -549,7 +725,9 @@ static int get_or_compute_Ik_cached(const fft_complex *density_mesh_fourier, fft
                                     FFTW(plan) inv_plan, const float *k_mag2_grid,
                                     int ngrid, size_t nreal, float kmin_bin, float kmax_bin,
                                     ik_cache_entry_t *cache_entries, int cache_size,
-                                    unsigned long long *cache_stamp, fft_real **out_workspace)
+                                    unsigned long long *cache_stamp, fft_real **out_workspace,
+                                    shell_index_cache_entry_t *shell_cache_entries, int shell_cache_size,
+                                    unsigned long long *shell_cache_stamp)
 {
   int victim = -1;
   unsigned long long oldest_stamp = 0;
@@ -591,7 +769,8 @@ static int get_or_compute_Ik_cached(const fft_complex *density_mesh_fourier, fft
   }
 
   if (compute_Ik_with_workspace_precomputed(density_mesh_fourier, masked_workspace, cache_entries[victim].data,
-                                            inv_plan, k_mag2_grid, ngrid, kmin_bin, kmax_bin) != 0) {
+                                            inv_plan, k_mag2_grid, ngrid, kmin_bin, kmax_bin,
+                                            shell_cache_entries, shell_cache_size, shell_cache_stamp) != 0) {
     return -1;
   }
 
@@ -793,12 +972,16 @@ static PyObject *core_compute_raw_bispectrum(PyObject * self, PyObject * args)
   int ik_cache_size = get_ik_cache_size();
   ik_cache_entry_t *ik_cache = (ik_cache_entry_t *)calloc((size_t)ik_cache_size, sizeof(ik_cache_entry_t));
   unsigned long long ik_cache_stamp = 0;
+  int shell_cache_size = get_mask_cache_size();
+  shell_index_cache_entry_t *shell_cache = (shell_index_cache_entry_t *)calloc((size_t)shell_cache_size, sizeof(shell_index_cache_entry_t));
+  unsigned long long shell_cache_stamp = 0;
   FFTW(plan) inv_plan = NULL;
 
-  if (k_mag2_grid == NULL || masked_workspace == NULL || ik_cache == NULL) {
+  if (k_mag2_grid == NULL || masked_workspace == NULL || ik_cache == NULL || shell_cache == NULL) {
     PyErr_SetString(PyExc_RuntimeError, "Error allocating bispectrum workspaces");
     if (masked_workspace != NULL) FFTW(free)(masked_workspace);
     destroy_ik_cache(ik_cache, ik_cache_size);
+    destroy_shell_index_cache(shell_cache, shell_cache_size);
     free(k_mag2_grid);
     free(density_mesh_fourier);
     Py_DECREF(k1min_arr);
@@ -817,6 +1000,7 @@ static PyObject *core_compute_raw_bispectrum(PyObject * self, PyObject * args)
     PyErr_SetString(PyExc_RuntimeError, "Error creating inverse FFT plan");
     FFTW(free)(masked_workspace);
     destroy_ik_cache(ik_cache, ik_cache_size);
+    destroy_shell_index_cache(shell_cache, shell_cache_size);
     free(k_mag2_grid);
     free(density_mesh_fourier);
     Py_DECREF(k1min_arr);
@@ -842,13 +1026,16 @@ static PyObject *core_compute_raw_bispectrum(PyObject * self, PyObject * args)
 
     if (get_or_compute_Ik_cached(density_mesh_fourier, masked_workspace, inv_plan, k_mag2_grid,
                                  ngrid, nreal, k1min, k1max, ik_cache, ik_cache_size,
-                                 &ik_cache_stamp, &ik1_workspace) != 0 ||
+                                 &ik_cache_stamp, &ik1_workspace,
+                                 shell_cache, shell_cache_size, &shell_cache_stamp) != 0 ||
         get_or_compute_Ik_cached(density_mesh_fourier, masked_workspace, inv_plan, k_mag2_grid,
                                  ngrid, nreal, k2min, k2max, ik_cache, ik_cache_size,
-                                 &ik_cache_stamp, &ik2_workspace) != 0 ||
+                                 &ik_cache_stamp, &ik2_workspace,
+                                 shell_cache, shell_cache_size, &shell_cache_stamp) != 0 ||
         get_or_compute_Ik_cached(density_mesh_fourier, masked_workspace, inv_plan, k_mag2_grid,
                                  ngrid, nreal, k3min, k3max, ik_cache, ik_cache_size,
-                                 &ik_cache_stamp, &ik3_workspace) != 0) {
+                                 &ik_cache_stamp, &ik3_workspace,
+                                 shell_cache, shell_cache_size, &shell_cache_stamp) != 0) {
       ik_error = i;
       break;
     }
@@ -864,6 +1051,7 @@ static PyObject *core_compute_raw_bispectrum(PyObject * self, PyObject * args)
 
   FFTW(free)(masked_workspace);
   destroy_ik_cache(ik_cache, ik_cache_size);
+  destroy_shell_index_cache(shell_cache, shell_cache_size);
   free(k_mag2_grid);
 
   if (ik_error >= 0) {
@@ -902,7 +1090,6 @@ static PyObject *core_compute_normalization(PyObject * self, PyObject * args)
   }
 
   (void)verbose;
-  (void)nthreads;
 
   PyArrayObject *k1min_arr = (PyArrayObject *)PyArray_FROM_OTF(k1min_bin_obj, NPY_FLOAT32, NPY_ARRAY_IN_ARRAY);
   PyArrayObject *k1max_arr = (PyArrayObject *)PyArray_FROM_OTF(k1max_bin_obj, NPY_FLOAT32, NPY_ARRAY_IN_ARRAY);
@@ -971,12 +1158,16 @@ static PyObject *core_compute_normalization(PyObject * self, PyObject * args)
   int ik_cache_size = get_ik_cache_size();
   ik_cache_entry_t *ik_cache = (ik_cache_entry_t *)calloc((size_t)ik_cache_size, sizeof(ik_cache_entry_t));
   unsigned long long ik_cache_stamp = 0;
+  int shell_cache_size = get_mask_cache_size();
+  shell_index_cache_entry_t *shell_cache = (shell_index_cache_entry_t *)calloc((size_t)shell_cache_size, sizeof(shell_index_cache_entry_t));
+  unsigned long long shell_cache_stamp = 0;
   FFTW(plan) inv_plan = NULL;
 
-  if (k_mag2_grid == NULL || masked_workspace == NULL || ik_cache == NULL) {
+  if (k_mag2_grid == NULL || masked_workspace == NULL || ik_cache == NULL || shell_cache == NULL) {
     PyErr_SetString(PyExc_RuntimeError, "Error allocating normalization workspaces");
     if (masked_workspace != NULL) FFTW(free)(masked_workspace);
     destroy_ik_cache(ik_cache, ik_cache_size);
+    destroy_shell_index_cache(shell_cache, shell_cache_size);
     free(k_mag2_grid);
     free(dummy_density_mesh_fourier);
     Py_DECREF(k1min_arr);
@@ -993,6 +1184,7 @@ static PyObject *core_compute_normalization(PyObject * self, PyObject * args)
     PyErr_SetString(PyExc_RuntimeError, "Error creating inverse FFT plan");
     FFTW(free)(masked_workspace);
     destroy_ik_cache(ik_cache, ik_cache_size);
+    destroy_shell_index_cache(shell_cache, shell_cache_size);
     free(k_mag2_grid);
     free(dummy_density_mesh_fourier);
     Py_DECREF(k1min_arr);
@@ -1018,6 +1210,7 @@ static PyObject *core_compute_normalization(PyObject * self, PyObject * args)
     Py_DECREF(k3max_arr);
     FFTW(free)(masked_workspace);
     destroy_ik_cache(ik_cache, ik_cache_size);
+    destroy_shell_index_cache(shell_cache, shell_cache_size);
     free(k_mag2_grid);
     return NULL;
   }
@@ -1036,13 +1229,16 @@ static PyObject *core_compute_normalization(PyObject * self, PyObject * args)
 
     if (get_or_compute_Ik_cached(dummy_density_mesh_fourier, masked_workspace, inv_plan, k_mag2_grid,
                                  ngrid, nreal, k1min, k1max, ik_cache, ik_cache_size,
-                                 &ik_cache_stamp, &ik1_workspace) != 0 ||
+                                 &ik_cache_stamp, &ik1_workspace,
+                                 shell_cache, shell_cache_size, &shell_cache_stamp) != 0 ||
         get_or_compute_Ik_cached(dummy_density_mesh_fourier, masked_workspace, inv_plan, k_mag2_grid,
                                  ngrid, nreal, k2min, k2max, ik_cache, ik_cache_size,
-                                 &ik_cache_stamp, &ik2_workspace) != 0 ||
+                                 &ik_cache_stamp, &ik2_workspace,
+                                 shell_cache, shell_cache_size, &shell_cache_stamp) != 0 ||
         get_or_compute_Ik_cached(dummy_density_mesh_fourier, masked_workspace, inv_plan, k_mag2_grid,
                                  ngrid, nreal, k3min, k3max, ik_cache, ik_cache_size,
-                                 &ik_cache_stamp, &ik3_workspace) != 0) {
+                                 &ik_cache_stamp, &ik3_workspace,
+                                 shell_cache, shell_cache_size, &shell_cache_stamp) != 0) {
       ik_error = i;
       break;
     }
@@ -1057,6 +1253,7 @@ static PyObject *core_compute_normalization(PyObject * self, PyObject * args)
 
   FFTW(free)(masked_workspace);
   destroy_ik_cache(ik_cache, ik_cache_size);
+  destroy_shell_index_cache(shell_cache, shell_cache_size);
   free(k_mag2_grid);
 
   if (ik_error >= 0) {
@@ -1271,10 +1468,13 @@ static PyObject *core_compute_effective_triangles(PyObject * self, PyObject * ar
     int ik_cache_size = get_ik_cache_size();
     ik_cache_entry_t *ik_cache = (ik_cache_entry_t *)calloc((size_t)ik_cache_size, sizeof(ik_cache_entry_t));
     unsigned long long ik_cache_stamp = 0;
+    int shell_cache_size = get_mask_cache_size();
+    shell_index_cache_entry_t *shell_cache = (shell_index_cache_entry_t *)calloc((size_t)shell_cache_size, sizeof(shell_index_cache_entry_t));
+    unsigned long long shell_cache_stamp = 0;
     FFTW(plan) inv_plan = NULL;
     int local_setup_error = 0;
 
-    if (masked_workspace == NULL || plan_workspace == NULL || ik_cache == NULL) {
+    if (masked_workspace == NULL || plan_workspace == NULL || ik_cache == NULL || shell_cache == NULL) {
       local_setup_error = 1;
     }
 
@@ -1308,16 +1508,20 @@ static PyObject *core_compute_effective_triangles(PyObject * self, PyObject * ar
 
         if (get_or_compute_Ik_cached(dummy_density_mesh_fourier, masked_workspace, inv_plan, k_mag2_grid,
                                      ngrid, nreal, k1min, k1max, ik_cache, ik_cache_size,
-                                     &ik_cache_stamp, &ik1_workspace) != 0 ||
+                                     &ik_cache_stamp, &ik1_workspace,
+                                     shell_cache, shell_cache_size, &shell_cache_stamp) != 0 ||
           get_or_compute_Ik_cached(dummy_density_mesh_fourier, masked_workspace, inv_plan, k_mag2_grid,
                                    ngrid, nreal, k2min, k2max, ik_cache, ik_cache_size,
-                                   &ik_cache_stamp, &ik2_workspace) != 0 ||
+                                   &ik_cache_stamp, &ik2_workspace,
+                                   shell_cache, shell_cache_size, &shell_cache_stamp) != 0 ||
           get_or_compute_Ik_cached(dummy_density_mesh_fourier, masked_workspace, inv_plan, k_mag2_grid,
                                    ngrid, nreal, k3min, k3max, ik_cache, ik_cache_size,
-                                   &ik_cache_stamp, &ik3_workspace) != 0 ||
+                                   &ik_cache_stamp, &ik3_workspace,
+                                   shell_cache, shell_cache_size, &shell_cache_stamp) != 0 ||
           get_or_compute_Ik_cached(k_mesh_fourier, masked_workspace, inv_plan, k_mag2_grid,
                                    ngrid, nreal, k1min, k1max, ik_cache, ik_cache_size,
-                                   &ik_cache_stamp, &iq_workspace) != 0) {
+                                   &ik_cache_stamp, &iq_workspace,
+                                   shell_cache, shell_cache_size, &shell_cache_stamp) != 0) {
 #pragma omp critical
           {
             if (!bin_error) {
@@ -1338,7 +1542,8 @@ static PyObject *core_compute_effective_triangles(PyObject * self, PyObject * ar
 
         if (get_or_compute_Ik_cached(k_mesh_fourier, masked_workspace, inv_plan, k_mag2_grid,
                                      ngrid, nreal, k2min, k2max, ik_cache, ik_cache_size,
-                                     &ik_cache_stamp, &iq_workspace) != 0) {
+                                     &ik_cache_stamp, &iq_workspace,
+                                     shell_cache, shell_cache_size, &shell_cache_stamp) != 0) {
 #pragma omp critical
           {
             if (!bin_error) {
@@ -1355,7 +1560,8 @@ static PyObject *core_compute_effective_triangles(PyObject * self, PyObject * ar
 
         if (get_or_compute_Ik_cached(k_mesh_fourier, masked_workspace, inv_plan, k_mag2_grid,
                                      ngrid, nreal, k3min, k3max, ik_cache, ik_cache_size,
-                                     &ik_cache_stamp, &iq_workspace) != 0) {
+                                     &ik_cache_stamp, &iq_workspace,
+                                     shell_cache, shell_cache_size, &shell_cache_stamp) != 0) {
 #pragma omp critical
           {
             if (!bin_error) {
@@ -1388,6 +1594,9 @@ static PyObject *core_compute_effective_triangles(PyObject * self, PyObject * ar
     if (ik_cache != NULL) {
       destroy_ik_cache(ik_cache, ik_cache_size);
     }
+    if (shell_cache != NULL) {
+      destroy_shell_index_cache(shell_cache, shell_cache_size);
+    }
   }
 
   omp_set_schedule(prev_sched_kind, prev_sched_chunk);
@@ -1401,9 +1610,12 @@ static PyObject *core_compute_effective_triangles(PyObject * self, PyObject * ar
   int ik_cache_size = get_ik_cache_size();
   ik_cache_entry_t *ik_cache = (ik_cache_entry_t *)calloc((size_t)ik_cache_size, sizeof(ik_cache_entry_t));
   unsigned long long ik_cache_stamp = 0;
+  int shell_cache_size = get_mask_cache_size();
+  shell_index_cache_entry_t *shell_cache = (shell_index_cache_entry_t *)calloc((size_t)shell_cache_size, sizeof(shell_index_cache_entry_t));
+  unsigned long long shell_cache_stamp = 0;
   FFTW(plan) inv_plan = NULL;
 
-  if (masked_workspace == NULL || plan_workspace == NULL || ik_cache == NULL) {
+  if (masked_workspace == NULL || plan_workspace == NULL || ik_cache == NULL || shell_cache == NULL) {
     bin_error = 1;
     error_bin = -1;
   } else {
@@ -1425,16 +1637,20 @@ static PyObject *core_compute_effective_triangles(PyObject * self, PyObject * ar
 
         if (get_or_compute_Ik_cached(dummy_density_mesh_fourier, masked_workspace, inv_plan, k_mag2_grid,
                                      ngrid, nreal, k1min, k1max, ik_cache, ik_cache_size,
-                                     &ik_cache_stamp, &ik1_workspace) != 0 ||
+                                     &ik_cache_stamp, &ik1_workspace,
+                                     shell_cache, shell_cache_size, &shell_cache_stamp) != 0 ||
           get_or_compute_Ik_cached(dummy_density_mesh_fourier, masked_workspace, inv_plan, k_mag2_grid,
                                    ngrid, nreal, k2min, k2max, ik_cache, ik_cache_size,
-                                   &ik_cache_stamp, &ik2_workspace) != 0 ||
+                                   &ik_cache_stamp, &ik2_workspace,
+                                   shell_cache, shell_cache_size, &shell_cache_stamp) != 0 ||
           get_or_compute_Ik_cached(dummy_density_mesh_fourier, masked_workspace, inv_plan, k_mag2_grid,
                                    ngrid, nreal, k3min, k3max, ik_cache, ik_cache_size,
-                                   &ik_cache_stamp, &ik3_workspace) != 0 ||
+                                   &ik_cache_stamp, &ik3_workspace,
+                                   shell_cache, shell_cache_size, &shell_cache_stamp) != 0 ||
           get_or_compute_Ik_cached(k_mesh_fourier, masked_workspace, inv_plan, k_mag2_grid,
                                    ngrid, nreal, k1min, k1max, ik_cache, ik_cache_size,
-                                   &ik_cache_stamp, &iq_workspace) != 0) {
+                                   &ik_cache_stamp, &iq_workspace,
+                                   shell_cache, shell_cache_size, &shell_cache_stamp) != 0) {
         bin_error = 1;
         error_bin = i;
         break;
@@ -1449,7 +1665,8 @@ static PyObject *core_compute_effective_triangles(PyObject * self, PyObject * ar
 
       if (get_or_compute_Ik_cached(k_mesh_fourier, masked_workspace, inv_plan, k_mag2_grid,
                                    ngrid, nreal, k2min, k2max, ik_cache, ik_cache_size,
-                                   &ik_cache_stamp, &iq_workspace) != 0) {
+                                   &ik_cache_stamp, &iq_workspace,
+                                   shell_cache, shell_cache_size, &shell_cache_stamp) != 0) {
         bin_error = 1;
         error_bin = i;
         break;
@@ -1460,7 +1677,8 @@ static PyObject *core_compute_effective_triangles(PyObject * self, PyObject * ar
 
       if (get_or_compute_Ik_cached(k_mesh_fourier, masked_workspace, inv_plan, k_mag2_grid,
                                    ngrid, nreal, k3min, k3max, ik_cache, ik_cache_size,
-                                   &ik_cache_stamp, &iq_workspace) != 0) {
+                                   &ik_cache_stamp, &iq_workspace,
+                                   shell_cache, shell_cache_size, &shell_cache_stamp) != 0) {
         bin_error = 1;
         error_bin = i;
         break;
@@ -1486,6 +1704,9 @@ static PyObject *core_compute_effective_triangles(PyObject * self, PyObject * ar
   }
   if (ik_cache != NULL) {
     destroy_ik_cache(ik_cache, ik_cache_size);
+  }
+  if (shell_cache != NULL) {
+    destroy_shell_index_cache(shell_cache, shell_cache_size);
   }
 #endif
 
